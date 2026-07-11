@@ -34,5 +34,5 @@ Only Caddy should expose ports 80 and 443. The Relay container is intentionally 
 
 ## Status
 
-Milestone M0 is complete: the repository is split into `src/core/` (protocol, room manager, room store interface, server construction — no environment access) and two thin shells, `src/standalone.ts` (VPS/Docker) and `src/local.ts` (Windows host, auto-generated creator key, `start-relay.bat`). Both shells pass `scripts/smoke.mjs`. Development follows `docs/V1-PLAN.md`; the next milestone is M1: rooms and invitations.
+Milestones M0 and M1 are complete. The repository is split into `src/core/` (protocol, room manager, room store interface, server construction — no environment access) and two thin shells, `src/standalone.ts` (VPS/Docker) and `src/local.ts` (Windows host, auto-generated creator key, `start-relay.bat`). Rooms, invitations, host/guest roles, and member presence broadcasting are live: `auth.hello` issues resumable identities, `room.create` (creator key required) returns a limited-use invite token, and `room.join`/`room.leave`/`room.kick` enforce roles server-side. Both shells pass the two-client `scripts/smoke.mjs` flow. Development follows `docs/V1-PLAN.md`; the next milestone is M2: the shared timeline, proposal queue, and reconnect resume.
 

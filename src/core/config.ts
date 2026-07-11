@@ -13,12 +13,15 @@ export type RelayConfig = {
     creatorKey: string;
     maxRoomMembers: number;
     roomTtlHours: number;
+    /** Lifetime of the invite token issued at room.create. */
+    inviteTtlHours: number;
 };
 
 export const CONFIG_DEFAULTS = Object.freeze({
     wsPath: '/ws',
     maxRoomMembers: 6,
     roomTtlHours: 168,
+    inviteTtlHours: 24,
 });
 
 export type RelayConfigInput = {
@@ -28,6 +31,7 @@ export type RelayConfigInput = {
     wsPath?: string;
     maxRoomMembers?: number;
     roomTtlHours?: number;
+    inviteTtlHours?: number;
 };
 
 export function createRelayConfig(input: RelayConfigInput): RelayConfig {
@@ -47,6 +51,11 @@ export function createRelayConfig(input: RelayConfigInput): RelayConfig {
         throw new Error('roomTtlHours must be a positive number.');
     }
 
+    const inviteTtlHours = input.inviteTtlHours ?? CONFIG_DEFAULTS.inviteTtlHours;
+    if (!Number.isFinite(inviteTtlHours) || inviteTtlHours <= 0) {
+        throw new Error('inviteTtlHours must be a positive number.');
+    }
+
     return {
         host: input.host,
         port: input.port,
@@ -54,5 +63,6 @@ export function createRelayConfig(input: RelayConfigInput): RelayConfig {
         creatorKey: input.creatorKey,
         maxRoomMembers,
         roomTtlHours,
+        inviteTtlHours,
     };
 }

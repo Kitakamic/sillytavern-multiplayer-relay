@@ -16,6 +16,7 @@ const config = createRelayConfig({
     creatorKey,
     maxRoomMembers: process.env.MAX_ROOM_MEMBERS ? Number(process.env.MAX_ROOM_MEMBERS) : undefined,
     roomTtlHours: process.env.ROOM_TTL_HOURS ? Number(process.env.ROOM_TTL_HOURS) : undefined,
+    inviteTtlHours: process.env.INVITE_TTL_HOURS ? Number(process.env.INVITE_TTL_HOURS) : undefined,
 });
 
 const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), config));

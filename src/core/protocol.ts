@@ -26,6 +26,35 @@ export const CommandType = Object.freeze({
     GENERATION_FINISH: 'generation.finish',
 });
 
+/**
+ * Event vocabulary (relay → clients). Mirrored in the plugin's
+ * src/protocol.js; documented in the plugin repository's docs/V1-PLAN.md §2.
+ */
+export const EventType = Object.freeze({
+    ROOM_MEMBER_JOINED: 'room.member.joined',
+    ROOM_MEMBER_LEFT: 'room.member.left',
+    ROOM_MEMBER_ONLINE: 'room.member.online',
+    ROOM_MEMBER_OFFLINE: 'room.member.offline',
+    ROOM_CLOSED: 'room.closed',
+});
+
+/** Machine-readable error codes carried in error payloads (payload.code). */
+export const ErrorCode = Object.freeze({
+    BAD_PAYLOAD: 'BAD_PAYLOAD',
+    NOT_AUTHENTICATED: 'NOT_AUTHENTICATED',
+    ALREADY_IN_ROOM: 'ALREADY_IN_ROOM',
+    NOT_IN_ROOM: 'NOT_IN_ROOM',
+    CREATOR_KEY_INVALID: 'CREATOR_KEY_INVALID',
+    ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
+    ROOM_FULL: 'ROOM_FULL',
+    INVITE_INVALID: 'INVITE_INVALID',
+    FORBIDDEN: 'FORBIDDEN',
+    TARGET_NOT_FOUND: 'TARGET_NOT_FOUND',
+    NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
+    UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
+    INTERNAL: 'INTERNAL',
+});
+
 export type ClientCommand = {
     v: number;
     kind: 'cmd';
@@ -35,14 +64,30 @@ export type ClientCommand = {
     payload?: Record<string, unknown>;
 };
 
-export type RelayMessage = ClientCommand | {
+export type RelayReply = {
     v: number;
-    kind: 'ack' | 'error' | 'event';
+    kind: 'ack' | 'error';
     type: string;
     requestId?: string;
     eventId?: string;
     payload?: Record<string, unknown>;
 };
+
+/**
+ * Room events carry roomId/seq at the top level: the plugin's RoomStore
+ * dedupes on message.seq directly.
+ */
+export type RelayEvent = {
+    v: number;
+    kind: 'event';
+    type: string;
+    eventId: string;
+    roomId: string;
+    seq: number;
+    payload: Record<string, unknown>;
+};
+
+export type RelayMessage = ClientCommand | RelayReply | RelayEvent;
 
 export function parseClientCommand(raw: string): ClientCommand {
     const value: unknown = JSON.parse(raw);
@@ -63,8 +108,12 @@ export function createAck(command: ClientCommand, payload: Record<string, unknow
     return { v: PROTOCOL_VERSION, kind: 'ack', type: `${command.type}.ack`, requestId: command.requestId, payload };
 }
 
-export function createError(message: string, requestId?: string): RelayMessage {
-    return { v: PROTOCOL_VERSION, kind: 'error', type: 'relay.error', requestId, eventId: randomUUID(), payload: { message } };
+export function createError(message: string, requestId?: string, code: string = ErrorCode.INTERNAL): RelayMessage {
+    return { v: PROTOCOL_VERSION, kind: 'error', type: 'relay.error', requestId, eventId: randomUUID(), payload: { message, code } };
+}
+
+export function createEvent(type: string, roomId: string, seq: number, payload: Record<string, unknown>): RelayEvent {
+    return { v: PROTOCOL_VERSION, kind: 'event', type, eventId: randomUUID(), roomId, seq, payload };
 }
 
 export function serialize(message: RelayMessage): string {

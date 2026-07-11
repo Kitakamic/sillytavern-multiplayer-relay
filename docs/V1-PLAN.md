@@ -49,13 +49,14 @@ sillytavern-multiplayer-relay/
 
 > 命令词汇表的唯一权威见插件仓库 `docs/V1-PLAN.md` 第 2 节（以插件 `src/protocol.js` 的既有命名为准）；relay 侧 `src/core/protocol.ts` 必须与其逐字一致。插件侧的模块细化计划也在该文档（阶段 P0–P2 对应本计划 M1–M4）。
 
-### M1 — 房间与邀请
+### M1 — 房间与邀请（✅ 完成于 2026-07-11）
 
-- [ ] 命令：`auth.hello` / `room.create` / `room.join` / `room.leave` / `room.kick`（kick 仅房主）。
-- [ ] 邀请码：编码 `{v, relayUrl, roomId, token}`（base64url JSON），token 高熵、有过期时间、可单次或限次使用。
-- [ ] 角色模型：host / guest，写操作服务端强制校验角色。
-- [ ] 成员事件广播：加入、离开、掉线、重连。
-- [ ] **验收**：两个浏览器客户端可通过邀请码进入同一房间并互相看到成员变化；非房主调用房主命令被拒绝。
+- [x] 命令：`auth.hello` / `room.create` / `room.join` / `room.leave` / `room.kick`（kick 仅房主）。`auth.hello` 颁发 `{clientId, sessionToken}` 恢复凭据，重连时携带即可恢复身份与房间席位（掉线保留席位，广播 offline/online 在线状态事件）。
+- [x] 邀请码：`room.create` 的 ack 返回 `inviteToken`（24 字节随机、base64url），由插件侧拼装成 `{v, relayUrl, roomId, token}` 邀请码；有效期 `inviteTtlHours`（默认 24h，封顶于房间过期时间），限次使用（`maxRoomMembers - 1` 次）。V1 每房一码、不支持重新签发。
+- [x] 角色模型：host / guest；`room.kick` 服务端校验 host 角色，非房主返回 `FORBIDDEN`。密钥/令牌比较恒定时间（sha256 + timingSafeEqual）。
+- [x] 成员事件广播：`room.member.joined` / `room.member.left`（含 kicked 原因）/ `room.member.offline` / `room.member.online` / `room.closed`，全部写入房间事件日志（带 seq）后向在线成员扇出。事件与错误码词汇表见插件仓库 V1-PLAN §2.1。
+- [x] **验收**：`scripts/smoke.mjs` 双客户端全流程——建房、邀请码往返、入房互见成员与在线状态、错误密钥/令牌被拒、客人越权 kick 被拒（FORBIDDEN）、掉线→offline 广播、凭恢复凭据重连→online 广播、踢人通知被踢者、房主离房→room.closed→房间不可再加入。
+- 备注（V1 决定）：房主显式 `room.leave` 即关房（掉线不关房，接受"房主单点"限制）；房间过期采用访问时惰性清理；被踢者若邀请码仍有剩余次数可重新加入，V1 接受（限次+有效期兜底）。
 
 ### M2 — 共享时间线、提案队列与重连
 

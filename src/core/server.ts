@@ -51,12 +51,15 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager)
             }
 
             try {
-                roomManager.handle(session, parseClientCommand(data.toString()));
+                // handle() reports failures to the client itself and never rejects.
+                void roomManager.handle(session, parseClientCommand(data.toString()));
             } catch (error) {
                 const message = error instanceof Error ? error.message : 'Invalid message.';
                 session.send(createError(message));
             }
         });
+
+        socket.on('close', () => roomManager.handleDisconnect(session));
     });
 
     return {
