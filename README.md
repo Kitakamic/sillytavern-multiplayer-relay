@@ -33,5 +33,5 @@ Only Caddy should expose ports 80 and 443. The Relay container is intentionally 
 
 ## Status
 
-This repository contains the runnable transport and protocol scaffold. Persistent room storage, invitation issuance, role enforcement, and room commands are the next implementation milestone.
+This repository contains the runnable transport and protocol scaffold. Development follows the milestone plan in `docs/V1-PLAN.md` (single core, two deployment shells: VPS standalone and local Windows host). The next milestone is M0: extracting `src/core/` and adding the local shell.
 
