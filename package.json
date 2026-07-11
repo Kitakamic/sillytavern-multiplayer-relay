@@ -1,0 +1,26 @@
+{
+  "name": "sillytavern-multiplayer-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private WSS relay for SillyTavern Multiplayer",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "check:syntax": "node --experimental-strip-types --check src/index.ts && node --experimental-strip-types --check src/protocol.ts && node --experimental-strip-types --check src/room-manager.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
