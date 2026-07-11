@@ -537,7 +537,11 @@ export class RoomManager {
             if (payload.charCount !== undefined && (typeof payload.charCount !== 'number' || payload.charCount < 0)) {
                 throw new CommandError(ErrorCode.BAD_PAYLOAD, 'charCount must be a non-negative number.');
             }
-            if (payload.charCount !== undefined) eventPayload = { charCount: payload.charCount };
+            if (payload.charCount !== undefined) eventPayload.charCount = payload.charCount;
+            // 流式文本快照（P2）：房主节流转发生成中的全文，客机渲染实时气泡。
+            // 上限受 WS 64KB 帧约束；瞬态事件不入日志，超长损失的只是预览。
+            const streamText = this.#optionalText(payload.text, 16000, 'text');
+            if (streamText) eventPayload.text = streamText;
             type = EventType.GENERATION_PROGRESSED;
         } else {
             if (payload.ok !== undefined && typeof payload.ok !== 'boolean') {

@@ -93,12 +93,12 @@ sillytavern-multiplayer-relay/
 
 > 游玩循环定稿（详见插件仓库 V1-PLAN P2）：AI 回复落地 → 自由输入期（成员直接 `story.message.publish`）→ 就绪信号计数 → 房主收束触发生成；"全员就绪自动生成"仅是房主端本地自动化，协议无分支。
 
-- [ ] `host-bridge.js`：全部通过 `SillyTavern.getContext()` 访问酒馆 API，不 import 内部模块。
-- [ ] 成员消息写入：房主端把成员的 user 消息（带角色名署名）写入选定的本地聊天。
-- [ ] 生成收束：房主端触发生成；`STREAM_TOKEN_RECEIVED` 节流后经 `generation.progress` 转发流式文本快照（注意 WS 64KB 帧上限）；完成后把 AI 回复以 assistant 角色发布到共享时间线。
-- [ ] 一致性：房主对消息的编辑/删除/swipe 通过显式"重新同步"（一键同步卡+存档快照）反映到房间（V1 不做自动监听）。
-- [ ] 版本护栏：`manifest.json` 的 `minimum_client_version` 严格维护；`getContext()` 缺少所需 API 时给出明确报错而非静默失败。
-- [ ] **验收**：完整一局——多成员自由发言、写入房主聊天、房主收束生成、流式输出全员可见、权威回复落时间线；房主酒馆升级一个小版本后插件仍工作或明确报错。
+- [x] `host-bridge.js`：全部通过 `SillyTavern.getContext()` 访问酒馆 API，不 import 内部模块。（插件侧代码完成于 2026-07-12）
+- [x] 成员消息写入：房主端把成员的 user 消息（带角色名署名）写入选定的本地聊天（`extra.stmpMessageId` 幂等标记 + 生成前 `catchUp` 补写）。
+- [x] 生成收束：房主端触发生成；`STREAM_TOKEN_RECEIVED` 节流后经 `generation.progress` 转发流式文本快照（`text` ≤16000，护 WS 64KB 帧上限）；完成后把 AI 回复以 assistant 角色发布到共享时间线。
+- [x] 一致性：房主对消息的编辑/删除/swipe 通过显式"重新同步"（一键同步卡+存档快照）反映到房间（V1 不做自动监听）。
+- [x] 版本护栏：`manifest.json` 的 `minimum_client_version` 严格维护；`getContext()` 缺少所需 API 时给出明确报错而非静默失败。
+- [ ] **验收**：完整一局——多成员自由发言、写入房主聊天、房主收束生成、流式输出全员可见、权威回复落时间线；房主酒馆升级一个小版本后插件仍工作或明确报错。（协议与数据层已由两侧冒烟验证，剩余真机手测）
 
 ### M5 — 加固与文档
 

@@ -245,6 +245,11 @@ assert(guestGen.kind === 'error' && guestGen.payload.code === 'FORBIDDEN', 'gues
 await host.request('generation.start', {});
 const genStarted = await third.waitEvent('generation.started');
 assert(genStarted.seq === undefined, 'generation events are transient (no seq)');
+await host.request('generation.progress', { text: '门缓缓地打开了，走廊里' });
+const genProgress = await third.waitEvent('generation.progressed', (e) => typeof e.payload.text === 'string');
+assert(genProgress.payload.text === '门缓缓地打开了，走廊里', 'streaming text snapshot passes through');
+const badProgress = await host.request('generation.progress', { text: 'x'.repeat(16001) });
+assert(badProgress.kind === 'error' && badProgress.payload.code === 'BAD_PAYLOAD', 'oversized stream snapshot rejected');
 await host.request('generation.finish', {});
 const genFinished = await third.waitEvent('generation.finished');
 assert(genFinished.payload.ok === true, 'generation.finished broadcast');
