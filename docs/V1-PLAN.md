@@ -46,9 +46,11 @@ sillytavern-multiplayer-relay/
 - [ ] `start-relay.bat`：Windows 双击启动（检测 node → npm install → 运行 local 外壳）。
 - [ ] **验收**：两个外壳都能启动；`/health` 正常；`relay.ping` 走 WS 收到 ack；`core/` 内 grep 不到 `process.env`。
 
+> 命令词汇表的唯一权威见插件仓库 `docs/V1-PLAN.md` 第 2 节（以插件 `src/protocol.js` 的既有命名为准）；relay 侧 `src/core/protocol.ts` 必须与其逐字一致。插件侧的模块细化计划也在该文档（阶段 P0–P2 对应本计划 M1–M4）。
+
 ### M1 — 房间与邀请
 
-- [ ] 命令：`room.create` / `room.join` / `room.leave` / `room.kick`（仅房主）。
+- [ ] 命令：`auth.hello` / `room.create` / `room.join` / `room.leave` / `room.kick`（kick 仅房主）。
 - [ ] 邀请码：编码 `{v, relayUrl, roomId, token}`（base64url JSON），token 高熵、有过期时间、可单次或限次使用。
 - [ ] 角色模型：host / guest，写操作服务端强制校验角色。
 - [ ] 成员事件广播：加入、离开、掉线、重连。
@@ -57,8 +59,8 @@ sillytavern-multiplayer-relay/
 ### M2 — 共享时间线、提案队列与重连
 
 - [ ] 事件日志：房间内单调递增 `seq`，中继是排序的唯一权威。
-- [ ] 命令：`action.propose`（客人）/ `action.accept` / `action.reject`（仅房主）/ `story.append`（仅房主）/ `sidechat.post`（所有人）。
-- [ ] 重连：客户端带最后已知 `seq` 请求 `room.sync`，中继返回快照 + 增量；`opId` 幂等去重。
+- [ ] 命令：`proposal.submit` / `proposal.withdraw`（客人）、`proposal.accept` / `proposal.reject` / `story.message.publish`（仅房主）、`sidechat.message.post`（所有人）、`generation.start` / `generation.progress` / `generation.finish`（仅房主，生成状态广播）。
+- [ ] 重连：客户端带最后已知 `seq` 请求 `room.resume`，中继返回快照 + 增量；`opId` 幂等去重。
 - [ ] 保留策略：共享文本保留期限可配置（默认建议 72h 或房间关闭即清）。
 - [ ] **验收**：断网重连后时间线无缺失、无重复；提案被拒后不出现在故事时间线。
 
@@ -92,7 +94,7 @@ sillytavern-multiplayer-relay/
 |---|---|
 | 酒馆内部 API 变动打断 host-bridge | 只走 `getContext()`；版本护栏；M4 单独隔离该层 |
 | 房主单点（掉线即停摆） | V1 接受此限制；事件日志 + 快照使重开成本低；房主迁移留待 V2 |
-| 客人投影与房主真实聊天不一致 | `seq` 全序 + `room.sync` 全量重同步兜底；房主编辑走显式重同步 |
+| 客人投影与房主真实聊天不一致 | `seq` 全序 + `room.resume` 全量重同步兜底；房主编辑走显式重同步 |
 | 本地模式仍需隧道，配置劝退 | M5 文档给 cloudflared 一条命令方案；V2 再考虑自动拉起隧道 |
 | 两外壳行为漂移 | 纪律 1–4 + 验收里对两外壳跑同一套冒烟测试 |
 
