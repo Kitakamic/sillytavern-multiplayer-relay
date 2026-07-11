@@ -6,13 +6,12 @@ import {
     type ClientCommand, type RelayMessage,
 } from './protocol.js';
 import type { RelayConfig } from './config.js';
-import type { MemberRole, ProposalRecord, RoomRecord, RoomStore, StoredEvent } from './room-store.js';
+import type { MemberRole, RoomRecord, RoomStore, StoredEvent } from './room-store.js';
 import type { AssetStore } from './asset-store.js';
 
 const DISPLAY_NAME_MAX_LENGTH = 50;
 const STORY_TEXT_MAX_LENGTH = 8000;
 const SIDECHAT_TEXT_MAX_LENGTH = 2000;
-const REJECT_REASON_MAX_LENGTH = 500;
 
 class CommandError extends Error {
     constructor(public readonly code: string, message: string) {
@@ -143,18 +142,12 @@ export class RoomManager {
                 return this.#handleRoomChatUpdate(session, identity, command);
             case CommandType.ROOM_CHAT_CLEAR:
                 return this.#handleRoomChatClear(session, identity, command);
-            case CommandType.PROPOSAL_SUBMIT:
-                return this.#handleProposalSubmit(session, identity, command);
-            case CommandType.PROPOSAL_WITHDRAW:
-                return this.#handleProposalWithdraw(session, identity, command);
-            case CommandType.PROPOSAL_ACCEPT:
-                return this.#handleProposalDecision(session, identity, command, 'accepted');
-            case CommandType.PROPOSAL_REJECT:
-                return this.#handleProposalDecision(session, identity, command, 'rejected');
             case CommandType.STORY_MESSAGE_PUBLISH:
                 return this.#handleStoryPublish(session, identity, command);
             case CommandType.SIDECHAT_MESSAGE_POST:
                 return this.#handleSidechatPost(session, identity, command);
+            case CommandType.ROUND_READY:
+                return this.#handleRoundReady(session, identity, command);
             case CommandType.GENERATION_START:
             case CommandType.GENERATION_PROGRESS:
             case CommandType.GENERATION_FINISH:
@@ -468,80 +461,12 @@ export class RoomManager {
         await this.#publishEvent(roomId, EventType.ROOM_CHAT_CLEARED, { assetId }, command.opId);
     }
 
-    async #handleProposalSubmit(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
-        const roomId = this.#requireRoomId(identity);
-        if (identity.role !== 'guest') {
-            throw new CommandError(ErrorCode.FORBIDDEN, 'Only guests submit proposals; the host writes directly.');
-        }
-        if (await this.#replayCachedAck(session, roomId, command)) return;
-
-        const text = this.#requireText((command.payload ?? {}).text, STORY_TEXT_MAX_LENGTH, 'text');
-        const now = Date.now();
-        const proposal: ProposalRecord = {
-            proposalId: randomUUID(),
-            authorClientId: identity.clientId,
-            authorDisplayName: identity.displayName,
-            text,
-            status: 'pending',
-            createdAt: now,
-            updatedAt: now,
-        };
-        await this.store.addProposal(roomId, proposal);
-        await this.#finishOp(session, roomId, command, { proposalId: proposal.proposalId });
-        await this.#publishEvent(roomId, EventType.PROPOSAL_SUBMITTED, {
-            proposal: {
-                proposalId: proposal.proposalId,
-                authorClientId: proposal.authorClientId,
-                authorDisplayName: proposal.authorDisplayName,
-                text: proposal.text,
-                submittedAt: now,
-            },
-        }, command.opId);
-    }
-
-    async #handleProposalWithdraw(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
-        const roomId = this.#requireRoomId(identity);
-        if (await this.#replayCachedAck(session, roomId, command)) return;
-
-        const proposalId = this.#requireText((command.payload ?? {}).proposalId, 100, 'proposalId');
-        const proposal = await this.store.getProposal(roomId, proposalId);
-        if (!proposal) throw new CommandError(ErrorCode.TARGET_NOT_FOUND, 'No such proposal.');
-        if (proposal.authorClientId !== identity.clientId) {
-            throw new CommandError(ErrorCode.FORBIDDEN, 'Only the author may withdraw a proposal.');
-        }
-        await this.#transitionOrThrow(roomId, proposalId, 'withdrawn');
-
-        await this.#finishOp(session, roomId, command, { proposalId });
-        await this.#publishEvent(roomId, EventType.PROPOSAL_WITHDRAWN, { proposalId, clientId: identity.clientId }, command.opId);
-    }
-
-    async #handleProposalDecision(session: RelaySession, identity: Identity, command: ClientCommand, status: 'accepted' | 'rejected'): Promise<void> {
-        const roomId = this.#requireRoomId(identity);
-        this.#requireHost(identity);
-        if (await this.#replayCachedAck(session, roomId, command)) return;
-
-        const payload = command.payload ?? {};
-        const proposalId = this.#requireText(payload.proposalId, 100, 'proposalId');
-        const proposal = await this.store.getProposal(roomId, proposalId);
-        if (!proposal) throw new CommandError(ErrorCode.TARGET_NOT_FOUND, 'No such proposal.');
-        await this.#transitionOrThrow(roomId, proposalId, status);
-
-        const eventPayload: Record<string, unknown> = { proposalId };
-        if (status === 'rejected' && typeof payload.reason === 'string' && payload.reason.trim()) {
-            eventPayload.reason = payload.reason.trim().slice(0, REJECT_REASON_MAX_LENGTH);
-        }
-        await this.#finishOp(session, roomId, command, { proposalId });
-        await this.#publishEvent(
-            roomId,
-            status === 'accepted' ? EventType.PROPOSAL_ACCEPTED : EventType.PROPOSAL_REJECTED,
-            eventPayload,
-            command.opId,
-        );
-    }
-
+    /**
+     * 直连模式（2026-07-12 定稿）：任何成员都可直接发布 user 消息，
+     * relay 的 seq 是全序仲裁；assistant（AI 回复）仍仅限房主发布。
+     */
     async #handleStoryPublish(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
         const roomId = this.#requireRoomId(identity);
-        this.#requireHost(identity);
         if (await this.#replayCachedAck(session, roomId, command)) return;
 
         const payload = command.payload ?? {};
@@ -550,15 +475,18 @@ export class RoomManager {
         if (payload.role !== 'user' && payload.role !== 'assistant') {
             throw new CommandError(ErrorCode.BAD_PAYLOAD, "role must be 'user' or 'assistant'.");
         }
+        if (payload.role === 'assistant' && identity.role !== 'host') {
+            throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host publishes assistant messages.');
+        }
 
         const message: Record<string, unknown> = {
             messageId: randomUUID(),
+            authorClientId: identity.clientId,
             authorName,
             role: payload.role,
             text,
             publishedAt: Date.now(),
         };
-        if (typeof payload.proposalId === 'string' && payload.proposalId) message.proposalId = payload.proposalId;
 
         const stored = await this.#publishEvent(roomId, EventType.STORY_MESSAGE_PUBLISHED, { message }, command.opId);
         await this.#finishOp(session, roomId, command, { messageId: message.messageId, seq: stored.seq });
@@ -578,6 +506,20 @@ export class RoomManager {
         };
         await this.#finishOp(session, roomId, command, { messageId: message.messageId });
         await this.#publishEvent(roomId, EventType.SIDECHAT_MESSAGE_POSTED, { message }, command.opId);
+    }
+
+    /**
+     * 回合就绪/跳过信号（2026-07-12）：纯信息性，帮助房主决定何时触发生成。
+     * 瞬态广播、不入日志——重连的人丢失它没有任何后果。
+     */
+    async #handleRoundReady(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        const state = (command.payload ?? {}).state;
+        if (state !== 'ready' && state !== 'skip' && state !== 'clear') {
+            throw new CommandError(ErrorCode.BAD_PAYLOAD, "state must be 'ready', 'skip', or 'clear'.");
+        }
+        session.send(createAck(command, {}));
+        await this.#broadcastTransient(roomId, EventType.ROUND_READY_CHANGED, { clientId: identity.clientId, state });
     }
 
     /** generation.* status is transient: broadcast without seq, tracked only as a runtime flag. */
@@ -725,14 +667,6 @@ export class RoomManager {
     async #finishOp(session: RelaySession, roomId: string, command: ClientCommand, ackPayload: Record<string, unknown>): Promise<void> {
         await this.store.putOpResult(roomId, command.opId, ackPayload);
         session.send(createAck(command, ackPayload));
-    }
-
-    async #transitionOrThrow(roomId: string, proposalId: string, status: 'accepted' | 'rejected' | 'withdrawn'): Promise<void> {
-        try {
-            await this.store.transitionProposal(roomId, proposalId, status);
-        } catch {
-            throw new CommandError(ErrorCode.PROPOSAL_NOT_PENDING, 'Proposal is no longer pending.');
-        }
     }
 
     #requireDisplayName(value: unknown): string {

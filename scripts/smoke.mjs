@@ -192,7 +192,7 @@ assert(closedEvent.payload.reason === 'host_left', 'guests told room closed when
 const gone = await third.request('room.join', { roomId: invite.roomId, token: invite.token });
 assert(gone.kind === 'error' && gone.payload.code === 'ROOM_NOT_FOUND', 'closed room cannot be rejoined');
 
-// --- M2: shared timeline, proposal queue, reconnect resume ---
+// --- M2: shared timeline (direct mode), ready signals, reconnect resume ---
 
 const created2 = await host.request('room.create', { creatorKey });
 const room2 = created2.payload.roomId;
@@ -201,50 +201,40 @@ await guest2.request('room.join', { roomId: room2, token: token2 });
 const thirdJoin2 = await third.request('room.join', { roomId: room2, token: token2 });
 assert(thirdJoin2.kind === 'ack' && thirdJoin2.payload.members.length === 3, 'fresh room for M2 with three members');
 
-const hostSubmit = await host.request('proposal.submit', { text: '房主不该提案' });
-assert(hostSubmit.kind === 'error' && hostSubmit.payload.code === 'FORBIDDEN', 'host cannot submit proposals');
+// 直连模式：成员直接向共享时间线发言，relay 的 seq 是全序仲裁。
+const publishOpId = randomUUID();
+const guestPub = await guest2.request('story.message.publish', { text: '我推门而入。', authorName: '小红', role: 'user' }, { opId: publishOpId });
+assert(guestPub.kind === 'ack' && guestPub.payload.messageId && guestPub.payload.seq > 0, 'guest publishes a story message directly');
+const guestPubEvent = await host.waitEvent('story.message.published', (e) => e.payload.message.messageId === guestPub.payload.messageId);
+assert(guestPubEvent.payload.message.authorName === '小红' && guestPubEvent.payload.message.authorClientId === guestId, 'story message carries author identity');
 
-const submitOpId = randomUUID();
-const submitted = await guest2.request('proposal.submit', { text: '我推门而入。' }, { opId: submitOpId });
-assert(submitted.kind === 'ack' && submitted.payload.proposalId, 'guest proposal.submit');
-const pA = submitted.payload.proposalId;
-await host.waitEvent('proposal.submitted', (e) => e.payload.proposal.proposalId === pA);
-assert(true, 'host sees proposal.submitted broadcast');
+const republished = await guest2.request('story.message.publish', { text: '我推门而入。', authorName: '小红', role: 'user' }, { opId: publishOpId });
+assert(republished.kind === 'ack' && republished.payload.messageId === guestPub.payload.messageId, 'opId retry replays same ack (idempotent)');
 
-const resubmitted = await guest2.request('proposal.submit', { text: '我推门而入。' }, { opId: submitOpId });
-assert(resubmitted.kind === 'ack' && resubmitted.payload.proposalId === pA, 'opId retry replays same ack (idempotent)');
+const guestAssistant = await third.request('story.message.publish', { text: '越权的 AI 发言', authorName: 'AI', role: 'assistant' });
+assert(guestAssistant.kind === 'error' && guestAssistant.payload.code === 'FORBIDDEN', 'guests cannot publish assistant messages');
+const hostAssistant = await host.request('story.message.publish', { text: '门开了，风灌了进来。', authorName: '角色', role: 'assistant' });
+assert(hostAssistant.kind === 'ack', 'host publishes the assistant reply');
 
-const submittedB = await third.request('proposal.submit', { text: '我躲到桌子底下。' });
-const pB = submittedB.payload.proposalId;
+const badRole = await guest2.request('story.message.publish', { text: 'x', authorName: 'y', role: 'system' });
+assert(badRole.kind === 'error' && badRole.payload.code === 'BAD_PAYLOAD', 'invalid story role rejected');
 
-const submittedC = await guest2.request('proposal.submit', { text: '（口误，撤回这条）' });
-const pC = submittedC.payload.proposalId;
-const withdrawn = await guest2.request('proposal.withdraw', { proposalId: pC });
-assert(withdrawn.kind === 'ack', 'author withdraws own proposal');
-await host.waitEvent('proposal.withdrawn', (e) => e.payload.proposalId === pC);
-const acceptWithdrawn = await host.request('proposal.accept', { proposalId: pC });
-assert(acceptWithdrawn.kind === 'error' && acceptWithdrawn.payload.code === 'PROPOSAL_NOT_PENDING', 'withdrawn proposal cannot be accepted');
+const legacyProposal = await guest2.request('proposal.submit', { text: '旧协议命令' });
+assert(legacyProposal.kind === 'error' && legacyProposal.payload.code === 'UNKNOWN_COMMAND', 'proposal commands removed from protocol');
 
-const guestAccept = await third.request('proposal.accept', { proposalId: pA });
-assert(guestAccept.kind === 'error' && guestAccept.payload.code === 'FORBIDDEN', 'guest cannot accept proposals');
-
-const rejected = await host.request('proposal.reject', { proposalId: pB, reason: '和当前场景冲突' });
-assert(rejected.kind === 'ack', 'host rejects a proposal');
-const rejectedEvent = await third.waitEvent('proposal.rejected', (e) => e.payload.proposalId === pB);
-assert(rejectedEvent.payload.reason === '和当前场景冲突', 'author sees rejection with reason');
-
-const accepted = await host.request('proposal.accept', { proposalId: pA });
-assert(accepted.kind === 'ack', 'host accepts a proposal');
-await guest2.waitEvent('proposal.accepted', (e) => e.payload.proposalId === pA);
-assert(true, 'author sees proposal.accepted broadcast');
-
-const published = await host.request('story.message.publish', { text: '我推门而入。', authorName: '客人', role: 'user', proposalId: pA });
-assert(published.kind === 'ack' && published.payload.messageId && published.payload.seq > 0, 'host publishes accepted action to timeline');
-const storyEvent = await third.waitEvent('story.message.published', (e) => e.payload.message.proposalId === pA);
-assert(storyEvent.payload.message.role === 'user', 'guests see the story message');
-
-const guestPublish = await third.request('story.message.publish', { text: '越权发布', authorName: 'x', role: 'user' });
-assert(guestPublish.kind === 'error' && guestPublish.payload.code === 'FORBIDDEN', 'guest cannot publish to timeline');
+// 就绪/跳过信号：瞬态广播，不入日志。
+const badReady = await guest2.request('round.ready', { state: 'done' });
+assert(badReady.kind === 'error' && badReady.payload.code === 'BAD_PAYLOAD', 'invalid ready state rejected');
+const readyAck = await guest2.request('round.ready', { state: 'ready' });
+assert(readyAck.kind === 'ack', 'guest marks round ready');
+const readyEvent = await host.waitEvent('round.ready.changed', (e) => e.payload.clientId === guestId);
+assert(readyEvent.seq === undefined && readyEvent.payload.state === 'ready', 'ready signal is transient with state');
+await third.request('round.ready', { state: 'skip' });
+await host.waitEvent('round.ready.changed', (e) => e.payload.clientId === thirdId && e.payload.state === 'skip');
+assert(true, 'skip signal broadcast');
+await guest2.request('round.ready', { state: 'clear' });
+await host.waitEvent('round.ready.changed', (e) => e.payload.clientId === guestId && e.payload.state === 'clear');
+assert(true, 'clear signal broadcast');
 
 await third.request('sidechat.message.post', { text: '这段好玩哈哈' });
 const sidechatEvent = await host.waitEvent('sidechat.message.posted');
@@ -278,10 +268,10 @@ assert(contiguous && resume.payload.lastSeq === seqs[seqs.length - 1], 'resume d
 assert(resume.payload.events.some((e) => e.type === 'story.message.published' && e.payload.message.text.includes('离线时的剧情推进')), 'missed story message recovered');
 
 const fullReplay = await third2.request('room.resume', { lastAppliedSeq: 0 });
-const submitEvents = fullReplay.payload.events.filter((e) => e.type === 'proposal.submitted' && e.payload.proposal.proposalId === pA);
-assert(submitEvents.length === 1, 'opId dedup kept the retried submit out of the log');
-const rejectedOnTimeline = fullReplay.payload.events.some((e) => e.type === 'story.message.published' && e.payload.message.proposalId === pB);
-assert(!rejectedOnTimeline, 'rejected proposal never appears on the story timeline');
+const dupPublishes = fullReplay.payload.events.filter((e) => e.type === 'story.message.published' && e.payload.message.messageId === guestPub.payload.messageId);
+assert(dupPublishes.length === 1, 'opId dedup kept the retried publish out of the log');
+const readyLogged = fullReplay.payload.events.some((e) => e.type === 'round.ready.changed');
+assert(!readyLogged, 'ready signals never enter the room log');
 
 const badResume = await third2.request('room.resume', { lastAppliedSeq: -1 });
 assert(badResume.kind === 'error' && badResume.payload.code === 'BAD_PAYLOAD', 'invalid lastAppliedSeq rejected');

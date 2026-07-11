@@ -28,18 +28,6 @@ export type RoomMember = {
     joinedAt: number;
 };
 
-export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'withdrawn';
-
-export type ProposalRecord = {
-    proposalId: string;
-    authorClientId: string;
-    authorDisplayName: string;
-    text: string;
-    status: ProposalStatus;
-    createdAt: number;
-    updatedAt: number;
-};
-
 export type StoredEvent = {
     /** Monotonically increasing, per-room. The relay is the ordering authority. */
     seq: number;
@@ -63,11 +51,6 @@ export interface RoomStore {
     getMember(roomId: string, clientId: string): Promise<RoomMember | null>;
     removeMember(roomId: string, clientId: string): Promise<void>;
     listMembers(roomId: string): Promise<RoomMember[]>;
-    addProposal(roomId: string, proposal: ProposalRecord): Promise<void>;
-    getProposal(roomId: string, proposalId: string): Promise<ProposalRecord | null>;
-    /** Atomically moves a pending proposal to a final status; rejects otherwise. */
-    transitionProposal(roomId: string, proposalId: string, status: Exclude<ProposalStatus, 'pending'>): Promise<ProposalRecord>;
-    listProposals(roomId: string): Promise<ProposalRecord[]>;
     /** Idempotency cache: the ack payload previously produced for this opId, if any. */
     getOpResult(roomId: string, opId: string): Promise<Record<string, unknown> | null>;
     putOpResult(roomId: string, opId: string, result: Record<string, unknown>): Promise<void>;
@@ -80,7 +63,6 @@ export class InMemoryRoomStore implements RoomStore {
     #rooms = new Map<string, RoomRecord>();
     #invites = new Map<string, RoomInvite>();
     #members = new Map<string, Map<string, RoomMember>>();
-    #proposals = new Map<string, Map<string, ProposalRecord>>();
     #opResults = new Map<string, Map<string, Record<string, unknown>>>();
     #events = new Map<string, StoredEvent[]>();
 
@@ -88,7 +70,6 @@ export class InMemoryRoomStore implements RoomStore {
         if (this.#rooms.has(room.roomId)) throw new Error(`Room '${room.roomId}' already exists.`);
         this.#rooms.set(room.roomId, { ...room });
         this.#members.set(room.roomId, new Map());
-        this.#proposals.set(room.roomId, new Map());
         this.#opResults.set(room.roomId, new Map());
         this.#events.set(room.roomId, []);
     }
@@ -102,7 +83,6 @@ export class InMemoryRoomStore implements RoomStore {
         this.#rooms.delete(roomId);
         this.#invites.delete(roomId);
         this.#members.delete(roomId);
-        this.#proposals.delete(roomId);
         this.#opResults.delete(roomId);
         this.#events.delete(roomId);
     }
@@ -144,32 +124,6 @@ export class InMemoryRoomStore implements RoomStore {
         const members = this.#members.get(roomId);
         if (!members) return [];
         return [...members.values()].map((member) => ({ ...member }));
-    }
-
-    async addProposal(roomId: string, proposal: ProposalRecord): Promise<void> {
-        const proposals = this.#proposals.get(roomId);
-        if (!proposals) throw new Error(`Room '${roomId}' does not exist.`);
-        proposals.set(proposal.proposalId, { ...proposal });
-    }
-
-    async getProposal(roomId: string, proposalId: string): Promise<ProposalRecord | null> {
-        const proposal = this.#proposals.get(roomId)?.get(proposalId);
-        return proposal ? { ...proposal } : null;
-    }
-
-    async transitionProposal(roomId: string, proposalId: string, status: Exclude<ProposalStatus, 'pending'>): Promise<ProposalRecord> {
-        const proposal = this.#proposals.get(roomId)?.get(proposalId);
-        if (!proposal) throw new Error('Proposal not found.');
-        if (proposal.status !== 'pending') throw new Error('Proposal is not pending.');
-        proposal.status = status;
-        proposal.updatedAt = Date.now();
-        return { ...proposal };
-    }
-
-    async listProposals(roomId: string): Promise<ProposalRecord[]> {
-        const proposals = this.#proposals.get(roomId);
-        if (!proposals) return [];
-        return [...proposals.values()].map((proposal) => ({ ...proposal }));
     }
 
     async getOpResult(roomId: string, opId: string): Promise<Record<string, unknown> | null> {

@@ -60,6 +60,8 @@ sillytavern-multiplayer-relay/
 
 ### M2 — 共享时间线、提案队列与重连（✅ 完成于 2026-07-11）
 
+> **2026-07-12 直连化改版：审核模式删除。** `proposal.*` 命令族、提案状态机与 `PROPOSAL_NOT_PENDING` 错误码整体移除（实现存档见 git 历史）；`story.message.publish` 放开给全体成员（user 角色；assistant 仍仅房主），消息携带 `authorClientId`；新增瞬态 `round.ready` 就绪/跳过信号（`round.ready.changed` 广播，无 seq 不入日志）。smoke 已按直连流重写并通过。以下为当时的完成记录，保留原文。
+
 - [x] 事件日志：房间内单调递增 `seq`，中继是排序的唯一权威（M1 已建；M2 全部内容事件入同一日志）。
 - [x] 命令：`proposal.submit` / `proposal.withdraw`（客人；withdraw 仅限作者本人）、`proposal.accept` / `proposal.reject` / `story.message.publish`（仅房主）、`sidechat.message.post`（所有人）、`generation.start` / `generation.progress` / `generation.finish`（仅房主）。提案状态机 pending → accepted/rejected/withdrawn 由服务端强制（非 pending 转移返回 `PROPOSAL_NOT_PENDING`）。
 - [x] 重连：序列为 `auth.hello`（凭据）→ `room.resume`（携带 `lastAppliedSeq`，应答含成员表、`generating` 标志、`lastSeq` 与增量事件数组）；内容类命令按房间缓存 `opId → ack`，重发只回放 ack、不重复产生事件。
@@ -87,14 +89,16 @@ sillytavern-multiplayer-relay/
 - [x] `ui.js`：控制中心——粘贴邀请码入房、成员列表、提案编辑器（镜像可用后退为备用入口）、房主的提案审核队列、副聊天、简易文本时间线（调试/回退用）；不做气泡式时间线，原生观感由插件 P3 镜像聊天承担。
 - [ ] **验收**：数据层全流程已由插件 `scripts/smoke-client.mjs` 脚本化验收（2026-07-11，双客户端投影收敛、desync 兜底、重连追平、关房传播）；剩余浮窗 UI 装入 SillyTavern 的真机双人手测。
 
-### M4 — 房主桥接（最脆弱层，单独成段）
+### M4 — 房主桥接（最脆弱层，单独成段；2026-07-12 改版：直连聊天室循环）
+
+> 游玩循环定稿（详见插件仓库 V1-PLAN P2）：AI 回复落地 → 自由输入期（成员直接 `story.message.publish`）→ 就绪信号计数 → 房主收束触发生成；"全员就绪自动生成"仅是房主端本地自动化，协议无分支。
 
 - [ ] `host-bridge.js`：全部通过 `SillyTavern.getContext()` 访问酒馆 API，不 import 内部模块。
-- [ ] `publishAcceptedAction()`：把已接受的提案作为用户侧消息写入房主选定的本地聊天。
-- [ ] `generateReply()`：房主端触发生成，完成后把 AI 回复镜像到共享时间线。
-- [ ] 一致性：房主对消息的编辑/删除/swipe 通过显式"重新同步"操作反映到时间线（V1 不做自动监听）。
+- [ ] 成员消息写入：房主端把成员的 user 消息（带角色名署名）写入选定的本地聊天。
+- [ ] 生成收束：房主端触发生成；`STREAM_TOKEN_RECEIVED` 节流后经 `generation.progress` 转发流式文本快照（注意 WS 64KB 帧上限）；完成后把 AI 回复以 assistant 角色发布到共享时间线。
+- [ ] 一致性：房主对消息的编辑/删除/swipe 通过显式"重新同步"（一键同步卡+存档快照）反映到房间（V1 不做自动监听）。
 - [ ] 版本护栏：`manifest.json` 的 `minimum_client_version` 严格维护；`getContext()` 缺少所需 API 时给出明确报错而非静默失败。
-- [ ] **验收**：完整一局——客人提案、房主接受、AI 生成、全员看到回复；房主酒馆升级一个小版本后插件仍工作或明确报错。
+- [ ] **验收**：完整一局——多成员自由发言、写入房主聊天、房主收束生成、流式输出全员可见、权威回复落时间线；房主酒馆升级一个小版本后插件仍工作或明确报错。
 
 ### M5 — 加固与文档
 
