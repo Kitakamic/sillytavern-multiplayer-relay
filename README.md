@@ -2,7 +2,7 @@
 
 Private WebSocket relay for the SillyTavern Multiplayer Plugin.
 
-The service is deliberately separate from SillyTavern. It coordinates room membership, invitations, ordering, and reconnects for clients that each run their own local SillyTavern. It must never receive an API key, hidden character data, world information, or a local filesystem path.
+The service is deliberately separate from SillyTavern. It coordinates room membership, invitations, ordering, and reconnects for clients that each run their own local SillyTavern. It must never receive an API key or a local filesystem path. Character and world data are likewise never received, with one exception: a character card the host explicitly shares to a room, which is relayed temporarily and deleted on expiry (see `docs/V1-PLAN.md`, milestone M4.5).
 
 ## V1 design
 
