@@ -38,13 +38,14 @@ sillytavern-multiplayer-relay/
 
 ## 3. 里程碑
 
-### M0 — 中继仓库重构为双外壳（当前第一步）
+### M0 — 中继仓库重构为双外壳（✅ 完成于 2026-07-11）
 
-- [ ] 抽出 `src/core/`：迁移 `protocol.ts`、`room-manager.ts`，新增 `room-store.ts` 接口 + 内存实现、`config.ts` 配置类型。
-- [ ] `src/standalone.ts`：现有 VPS 入口改为薄外壳（读 env → 构造 config → 启动 core），Docker/Caddy 配置保持可用。
-- [ ] `src/local.ts`：本地入口，默认监听 `127.0.0.1`，首次启动自动生成并持久化 creator key（免去 Windows 用户手配 env）。
-- [ ] `start-relay.bat`：Windows 双击启动（检测 node → npm install → 运行 local 外壳）。
-- [ ] **验收**：两个外壳都能启动；`/health` 正常；`relay.ping` 走 WS 收到 ack；`core/` 内 grep 不到 `process.env`。
+- [x] 抽出 `src/core/`：迁移 `protocol.ts`（并补入与插件对齐的 `CommandType` 词汇）、`room-manager.ts`，新增 `room-store.ts` 接口 + 内存实现、`config.ts` 配置类型、`server.ts` 服务构造。
+- [x] `src/standalone.ts`：现有 VPS 入口改为薄外壳（读 env → 构造 config → 启动 core），Docker/Caddy 配置保持可用；默认监听 `0.0.0.0`（修复了 .env.example 中 `HOST=127.0.0.1` 导致容器内 Caddy 连不上的隐患）；拒绝空/占位 creator key 启动。
+- [x] `src/local.ts`：本地入口，固定监听 `127.0.0.1`，首次启动自动生成并持久化 creator key 到 `data/local-relay-state.json`（已加入 .gitignore）。
+- [x] `start-relay.bat`：Windows 双击启动（检测 node → npm install → build → 运行 local 外壳）。
+- [x] **验收**：两个外壳均通过 `scripts/smoke.mjs`（/health、`relay.ping` ack、未知命令拒绝）；`src/core/` 内 grep 不到 `process.env`。
+- 备注：Windows 有保留端口段会导致 `listen EACCES`（`netsh interface ipv4 show excludedportrange protocol=tcp` 可查，本机 3007–3106 等段被占）；默认端口 3001 通常安全，M5 故障排查文档需收录此条。
 
 > 命令词汇表的唯一权威见插件仓库 `docs/V1-PLAN.md` 第 2 节（以插件 `src/protocol.js` 的既有命名为准）；relay 侧 `src/core/protocol.ts` 必须与其逐字一致。插件侧的模块细化计划也在该文档（阶段 P0–P2 对应本计划 M1–M4）。
 

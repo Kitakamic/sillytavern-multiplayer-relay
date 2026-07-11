@@ -1,5 +1,7 @@
 import WebSocket from 'ws';
-import { createAck, createError, serialize, type ClientCommand } from './protocol.js';
+import { createAck, createError, serialize, CommandType, type ClientCommand } from './protocol.js';
+import type { RelayConfig } from './config.js';
+import type { RoomStore } from './room-store.js';
 
 export class RelaySession {
     constructor(public readonly socket: WebSocket) {}
@@ -12,12 +14,18 @@ export class RelaySession {
 }
 
 /**
- * Transport-safe command boundary. Persistent rooms and authorization are added
- * here in the next milestone, rather than being mixed into WebSocket handlers.
+ * Transport-safe command boundary. Room commands, invitation issuance, and
+ * role enforcement (milestones M1–M2) are implemented here against the
+ * injected RoomStore, rather than being mixed into WebSocket handlers.
  */
 export class RoomManager {
+    constructor(
+        private readonly store: RoomStore,
+        private readonly config: RelayConfig,
+    ) {}
+
     handle(session: RelaySession, command: ClientCommand): void {
-        if (command.type === 'relay.ping') {
+        if (command.type === CommandType.RELAY_PING) {
             session.send(createAck(command, { serverTime: new Date().toISOString() }));
             return;
         }

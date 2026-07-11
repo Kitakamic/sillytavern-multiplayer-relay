@@ -8,11 +8,13 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "tsx watch src/local.ts",
+    "dev:standalone": "tsx watch src/standalone.ts",
+    "start": "node dist/standalone.js",
+    "start:local": "node dist/local.js",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "check:syntax": "node --experimental-strip-types --check src/index.ts && node --experimental-strip-types --check src/protocol.ts && node --experimental-strip-types --check src/room-manager.ts"
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.18.3"

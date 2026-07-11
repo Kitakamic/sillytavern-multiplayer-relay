@@ -15,11 +15,12 @@ The service is deliberately separate from SillyTavern. It coordinates room membe
 
 ```bash
 npm install
-copy .env.example .env
 npm run dev
 ```
 
-The health endpoint is available at `http://127.0.0.1:3001/health` by default. The WebSocket endpoint is `/ws`.
+`npm run dev` runs the local shell: it listens on `127.0.0.1:3001` and generates its creator key into `data/local-relay-state.json` on first start — no `.env` needed. Windows hosts can simply double-click `start-relay.bat`. To develop against the standalone (VPS) shell instead, copy `.env.example` to `.env` and use `npm run dev:standalone`.
+
+The health endpoint is available at `http://127.0.0.1:3001/health` by default. The WebSocket endpoint is `/ws`. Run `npm run smoke` against either shell to verify it.
 
 ## Production
 
@@ -33,5 +34,5 @@ Only Caddy should expose ports 80 and 443. The Relay container is intentionally 
 
 ## Status
 
-This repository contains the runnable transport and protocol scaffold. Development follows the milestone plan in `docs/V1-PLAN.md` (single core, two deployment shells: VPS standalone and local Windows host). The next milestone is M0: extracting `src/core/` and adding the local shell.
+Milestone M0 is complete: the repository is split into `src/core/` (protocol, room manager, room store interface, server construction — no environment access) and two thin shells, `src/standalone.ts` (VPS/Docker) and `src/local.ts` (Windows host, auto-generated creator key, `start-relay.bat`). Both shells pass `scripts/smoke.mjs`. Development follows `docs/V1-PLAN.md`; the next milestone is M1: rooms and invitations.
 
