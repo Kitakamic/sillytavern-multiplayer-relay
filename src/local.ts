@@ -5,6 +5,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { createRelayConfig } from './core/config.js';
 import { InMemoryRoomStore } from './core/room-store.js';
+import { InMemoryAssetStore } from './core/asset-store.js';
 import { RoomManager } from './core/room-manager.js';
 import { createRelayServer } from './core/server.js';
 
@@ -37,7 +38,8 @@ const config = createRelayConfig({
     creatorKey: loadOrCreateCreatorKey(),
 });
 
-const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), config));
+const assetStore = new InMemoryAssetStore();
+const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), assetStore, config), assetStore);
 await server.listen();
 
 console.log('[SillyTavern Multiplayer Relay] 本地模式已启动');

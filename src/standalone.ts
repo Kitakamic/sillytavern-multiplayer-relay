@@ -1,6 +1,7 @@
 import process from 'node:process';
 import { createRelayConfig } from './core/config.js';
 import { InMemoryRoomStore } from './core/room-store.js';
+import { InMemoryAssetStore } from './core/asset-store.js';
 import { RoomManager } from './core/room-manager.js';
 import { createRelayServer } from './core/server.js';
 
@@ -17,9 +18,11 @@ const config = createRelayConfig({
     maxRoomMembers: process.env.MAX_ROOM_MEMBERS ? Number(process.env.MAX_ROOM_MEMBERS) : undefined,
     roomTtlHours: process.env.ROOM_TTL_HOURS ? Number(process.env.ROOM_TTL_HOURS) : undefined,
     inviteTtlHours: process.env.INVITE_TTL_HOURS ? Number(process.env.INVITE_TTL_HOURS) : undefined,
+    assetTtlHours: process.env.ASSET_TTL_HOURS ? Number(process.env.ASSET_TTL_HOURS) : undefined,
 });
 
-const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), config));
+const assetStore = new InMemoryAssetStore();
+const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), assetStore, config), assetStore);
 await server.listen();
 console.log(`SillyTavern Multiplayer Relay (standalone) listening on http://${config.host}:${config.port}`);
 

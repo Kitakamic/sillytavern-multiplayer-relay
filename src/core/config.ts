@@ -15,6 +15,8 @@ export type RelayConfig = {
     roomTtlHours: number;
     /** Lifetime of the invite token issued at room.create. */
     inviteTtlHours: number;
+    /** Default (and maximum) lifetime of an uploaded room asset. */
+    assetTtlHours: number;
 };
 
 export const CONFIG_DEFAULTS = Object.freeze({
@@ -22,6 +24,7 @@ export const CONFIG_DEFAULTS = Object.freeze({
     maxRoomMembers: 6,
     roomTtlHours: 168,
     inviteTtlHours: 24,
+    assetTtlHours: 24,
 });
 
 export type RelayConfigInput = {
@@ -32,6 +35,7 @@ export type RelayConfigInput = {
     maxRoomMembers?: number;
     roomTtlHours?: number;
     inviteTtlHours?: number;
+    assetTtlHours?: number;
 };
 
 export function createRelayConfig(input: RelayConfigInput): RelayConfig {
@@ -56,6 +60,11 @@ export function createRelayConfig(input: RelayConfigInput): RelayConfig {
         throw new Error('inviteTtlHours must be a positive number.');
     }
 
+    const assetTtlHours = input.assetTtlHours ?? CONFIG_DEFAULTS.assetTtlHours;
+    if (!Number.isFinite(assetTtlHours) || assetTtlHours <= 0) {
+        throw new Error('assetTtlHours must be a positive number.');
+    }
+
     return {
         host: input.host,
         port: input.port,
@@ -64,5 +73,6 @@ export function createRelayConfig(input: RelayConfigInput): RelayConfig {
         maxRoomMembers,
         roomTtlHours,
         inviteTtlHours,
+        assetTtlHours,
     };
 }

@@ -286,6 +286,72 @@ assert(!rejectedOnTimeline, 'rejected proposal never appears on the story timeli
 const badResume = await third2.request('room.resume', { lastAppliedSeq: -1 });
 assert(badResume.kind === 'error' && badResume.payload.code === 'BAD_PAYLOAD', 'invalid lastAppliedSeq rejected');
 
+// --- M2.5: asset channel (HTTP, room-credential auth) ---
+
+const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 7)]);
+const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(32, 3)]);
+const credHeaders = (clientId, sessionToken) => ({ 'x-relay-client-id': clientId, 'x-relay-session-token': sessionToken });
+const hostCreds = credHeaders(hostHello.payload.clientId, hostHello.payload.sessionToken);
+const guestCreds = credHeaders(guestId, guestSessionToken);
+const thirdCreds2 = credHeaders(thirdId, thirdSessionToken);
+
+const upload = (creds, roomId, query, body, contentType) =>
+    fetch(`${base}/rooms/${roomId}/assets?${query}`, { method: 'POST', headers: { ...creds, 'content-type': contentType }, body });
+
+const cardUp = await upload(hostCreds, room2, 'kind=card', png, 'image/png');
+assert(cardUp.status === 200, 'host uploads character card');
+const cardAssetId = (await cardUp.json()).assetId;
+
+const download = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, { headers: thirdCreds2 });
+assert(download.status === 200 && download.headers.get('content-type') === 'image/png', 'guest downloads card with room credentials');
+assert(Buffer.from(await download.arrayBuffer()).equals(png), 'downloaded bytes match upload');
+
+const noAuth = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`);
+assert(noAuth.status === 401, 'download without credentials rejected');
+const badAuth = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, { headers: credHeaders(thirdId, 'wrong-token') });
+assert(badAuth.status === 401, 'download with wrong session token rejected');
+
+const outsider = await new SmokeClient('outsider').connect();
+const outsiderHello = await outsider.request('auth.hello', { displayName: '路人' });
+const crossRoom = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, {
+    headers: credHeaders(outsiderHello.payload.clientId, outsiderHello.payload.sessionToken),
+});
+assert(crossRoom.status === 403, 'non-member cannot access room assets');
+
+const guestCard = await upload(guestCreds, room2, 'kind=card', png, 'image/png');
+assert(guestCard.status === 403, 'guest cannot upload a character card');
+const guestAvatar = await upload(guestCreds, room2, 'kind=avatar', jpeg, 'image/jpeg');
+assert(guestAvatar.status === 200, 'guest uploads own avatar');
+
+const badKind = await upload(hostCreds, room2, 'kind=worldbook', png, 'image/png');
+assert(badKind.status === 400, 'non-card/avatar assets refused (boundary)');
+const wrongType = await upload(hostCreds, room2, 'kind=card', jpeg, 'image/jpeg');
+assert(wrongType.status === 415, 'card must be image/png');
+const badMagic = await upload(hostCreds, room2, 'kind=card', Buffer.alloc(32, 9), 'image/png');
+assert(badMagic.status === 415, 'mislabeled body rejected by magic bytes');
+const oversize = await upload(hostCreds, room2, 'kind=avatar', Buffer.concat([png, Buffer.alloc(5 * 1024 * 1024)]), 'image/png');
+assert(oversize.status === 413, 'oversize upload rejected');
+
+const shortLived = await upload(thirdCreds2, room2, 'kind=avatar&ttlSeconds=1', png, 'image/png');
+assert(shortLived.status === 200, 'ttlSeconds override accepted');
+const shortId = (await shortLived.json()).assetId;
+await new Promise((resolve) => setTimeout(resolve, 1300));
+const expiredAsset = await fetch(`${base}/rooms/${room2}/assets/${shortId}`, { headers: thirdCreds2 });
+assert(expiredAsset.status === 404, 'expired asset no longer served');
+
+let saw429 = false;
+for (let i = 0; i < 12 && !saw429; i++) {
+    const res = await upload(hostCreds, room2, 'kind=avatar', png, 'image/png');
+    if (res.status === 429) saw429 = true;
+}
+assert(saw429, 'upload rate limit kicks in');
+
+const leaveFinal = await host.request('room.leave');
+assert(leaveFinal.kind === 'ack', 'host closes the M2 room');
+const afterClose = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, { headers: thirdCreds2 });
+assert(afterClose.status === 403, 'assets die with the room');
+
+outsider.close();
 host.close();
 guest2.close();
 third2.close();

@@ -7,6 +7,7 @@ import {
 } from './protocol.js';
 import type { RelayConfig } from './config.js';
 import type { MemberRole, ProposalRecord, RoomRecord, RoomStore, StoredEvent } from './room-store.js';
+import type { AssetStore } from './asset-store.js';
 
 const DISPLAY_NAME_MAX_LENGTH = 50;
 const STORY_TEXT_MAX_LENGTH = 8000;
@@ -66,8 +67,26 @@ export class RoomManager {
 
     constructor(
         private readonly store: RoomStore,
+        private readonly assetStore: AssetStore,
         private readonly config: RelayConfig,
     ) {}
+
+    /**
+     * HTTP asset-channel auth (M2.5): validates session credentials and room
+     * membership. Returns the member's role and the room's expiry so the
+     * caller can cap asset TTLs.
+     */
+    async authorizeAssetAccess(clientId: string, sessionToken: string, roomId: string): Promise<
+        { role: MemberRole; roomExpiresAt: number } | 'unauthorized' | 'forbidden'
+    > {
+        const identity = this.#identities.get(clientId);
+        if (!identity || !secretsMatch(identity.sessionToken, sessionToken)) return 'unauthorized';
+        const room = await this.#getLiveRoom(roomId);
+        if (!room) return 'forbidden';
+        const member = await this.store.getMember(roomId, clientId);
+        if (!member) return 'forbidden';
+        return { role: member.role, roomExpiresAt: room.expiresAt };
+    }
 
     async handle(session: RelaySession, command: ClientCommand): Promise<void> {
         try {
@@ -485,6 +504,7 @@ export class RoomManager {
             }
         }
         this.#generating.delete(roomId);
+        await this.assetStore.deleteRoomAssets(roomId);
         await this.store.deleteRoom(roomId);
     }
 

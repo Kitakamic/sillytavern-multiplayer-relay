@@ -48,7 +48,11 @@ export const EventType = Object.freeze({
     GENERATION_FINISHED: 'generation.finished',
 });
 
-/** Machine-readable error codes carried in error payloads (payload.code). */
+/**
+ * Machine-readable error codes carried in error payloads (payload.code).
+ * UNAUTHORIZED, the ASSET_ entries, and RATE_LIMITED are used by the HTTP
+ * asset channel (M2.5), which returns JSON errors of the shape { error, code }.
+ */
 export const ErrorCode = Object.freeze({
     BAD_PAYLOAD: 'BAD_PAYLOAD',
     NOT_AUTHENTICATED: 'NOT_AUTHENTICATED',
@@ -64,6 +68,11 @@ export const ErrorCode = Object.freeze({
     NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
     UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
     INTERNAL: 'INTERNAL',
+    UNAUTHORIZED: 'UNAUTHORIZED',
+    ASSET_NOT_FOUND: 'ASSET_NOT_FOUND',
+    ASSET_TOO_LARGE: 'ASSET_TOO_LARGE',
+    UNSUPPORTED_ASSET_TYPE: 'UNSUPPORTED_ASSET_TYPE',
+    RATE_LIMITED: 'RATE_LIMITED',
 });
 
 export type ClientCommand = {
