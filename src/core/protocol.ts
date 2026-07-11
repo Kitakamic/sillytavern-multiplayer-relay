@@ -29,6 +29,7 @@ export const CommandType = Object.freeze({
 /**
  * Event vocabulary (relay → clients). Mirrored in the plugin's
  * src/protocol.js; documented in the plugin repository's docs/V1-PLAN.md §2.
+ * generation.* events are transient: broadcast without a seq, never logged.
  */
 export const EventType = Object.freeze({
     ROOM_MEMBER_JOINED: 'room.member.joined',
@@ -36,6 +37,15 @@ export const EventType = Object.freeze({
     ROOM_MEMBER_ONLINE: 'room.member.online',
     ROOM_MEMBER_OFFLINE: 'room.member.offline',
     ROOM_CLOSED: 'room.closed',
+    PROPOSAL_SUBMITTED: 'proposal.submitted',
+    PROPOSAL_WITHDRAWN: 'proposal.withdrawn',
+    PROPOSAL_ACCEPTED: 'proposal.accepted',
+    PROPOSAL_REJECTED: 'proposal.rejected',
+    STORY_MESSAGE_PUBLISHED: 'story.message.published',
+    SIDECHAT_MESSAGE_POSTED: 'sidechat.message.posted',
+    GENERATION_STARTED: 'generation.started',
+    GENERATION_PROGRESSED: 'generation.progressed',
+    GENERATION_FINISHED: 'generation.finished',
 });
 
 /** Machine-readable error codes carried in error payloads (payload.code). */
@@ -50,6 +60,7 @@ export const ErrorCode = Object.freeze({
     INVITE_INVALID: 'INVITE_INVALID',
     FORBIDDEN: 'FORBIDDEN',
     TARGET_NOT_FOUND: 'TARGET_NOT_FOUND',
+    PROPOSAL_NOT_PENDING: 'PROPOSAL_NOT_PENDING',
     NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
     UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
     INTERNAL: 'INTERNAL',
@@ -75,7 +86,8 @@ export type RelayReply = {
 
 /**
  * Room events carry roomId/seq at the top level: the plugin's RoomStore
- * dedupes on message.seq directly.
+ * dedupes on message.seq directly. Transient events (generation.*) omit
+ * seq — they are broadcast-only and never enter the room log.
  */
 export type RelayEvent = {
     v: number;
@@ -83,7 +95,7 @@ export type RelayEvent = {
     type: string;
     eventId: string;
     roomId: string;
-    seq: number;
+    seq?: number;
     payload: Record<string, unknown>;
 };
 
@@ -114,6 +126,11 @@ export function createError(message: string, requestId?: string, code: string = 
 
 export function createEvent(type: string, roomId: string, seq: number, payload: Record<string, unknown>): RelayEvent {
     return { v: PROTOCOL_VERSION, kind: 'event', type, eventId: randomUUID(), roomId, seq, payload };
+}
+
+/** Broadcast-only event with no seq; never appended to the room log. */
+export function createTransientEvent(type: string, roomId: string, payload: Record<string, unknown>): RelayEvent {
+    return { v: PROTOCOL_VERSION, kind: 'event', type, eventId: randomUUID(), roomId, payload };
 }
 
 export function serialize(message: RelayMessage): string {

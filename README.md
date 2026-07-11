@@ -2,7 +2,7 @@
 
 Private WebSocket relay for the SillyTavern Multiplayer Plugin.
 
-The service is deliberately separate from SillyTavern. It coordinates room membership, invitations, ordering, and reconnects for clients that each run their own local SillyTavern. It must never receive an API key or a local filesystem path. Character and world data are likewise never received, with one exception: a character card the host explicitly shares to a room, which is relayed temporarily and deleted on expiry (see `docs/V1-PLAN.md`, milestone M4.5).
+The service is deliberately separate from SillyTavern. It coordinates room membership, invitations, ordering, and reconnects for clients that each run their own local SillyTavern. It must never receive an API key or a local filesystem path. Character and world data are likewise never received, with one exception: a character card the host explicitly shares to a room, which is relayed temporarily and deleted on expiry (see `docs/V1-PLAN.md`, milestone M2.5).
 
 ## V1 design
 
@@ -34,5 +34,5 @@ Only Caddy should expose ports 80 and 443. The Relay container is intentionally 
 
 ## Status
 
-Milestones M0 and M1 are complete. The repository is split into `src/core/` (protocol, room manager, room store interface, server construction — no environment access) and two thin shells, `src/standalone.ts` (VPS/Docker) and `src/local.ts` (Windows host, auto-generated creator key, `start-relay.bat`). Rooms, invitations, host/guest roles, and member presence broadcasting are live: `auth.hello` issues resumable identities, `room.create` (creator key required) returns a limited-use invite token, and `room.join`/`room.leave`/`room.kick` enforce roles server-side. Both shells pass the two-client `scripts/smoke.mjs` flow. Development follows `docs/V1-PLAN.md`; the next milestone is M2: the shared timeline, proposal queue, and reconnect resume.
+Milestones M0–M2 are complete. The repository is split into `src/core/` (protocol, room manager, room store interface, server construction — no environment access) and two thin shells, `src/standalone.ts` (VPS/Docker) and `src/local.ts` (Windows host, auto-generated creator key, `start-relay.bat`). Rooms, invitations, host/guest roles, and member presence broadcasting are live (M1), as are the shared story timeline, the proposal queue with server-enforced state transitions, the side chat, transient generation-status broadcasts, and reconnect catch-up via `room.resume` with per-room `opId` idempotency (M2). Both shells pass the 50-check `scripts/smoke.mjs` flow. Development follows `docs/V1-PLAN.md`; the next milestone is M2.5: the room asset channel, moved up because the plugin's mirror-chat mode is now the primary guest experience.
 

@@ -33,6 +33,12 @@ class SmokeClient {
         this.label = label;
         this.events = [];
         this.rescans = new Set();
+        /** roomId → highest seq observed there; feeds room.resume. */
+        this.maxSeqByRoom = new Map();
+    }
+
+    maxSeqIn(roomId) {
+        return this.maxSeqByRoom.get(roomId) ?? 0;
     }
 
     async connect() {
@@ -44,6 +50,9 @@ class SmokeClient {
         this.socket.on('message', (raw) => {
             const message = JSON.parse(raw.toString());
             if (message.kind === 'event') {
+                if (typeof message.seq === 'number' && message.seq > this.maxSeqIn(message.roomId)) {
+                    this.maxSeqByRoom.set(message.roomId, message.seq);
+                }
                 this.events.push(message);
                 for (const rescan of [...this.rescans]) rescan();
             }
@@ -52,8 +61,8 @@ class SmokeClient {
     }
 
     /** Sends a command and resolves with the matching ack/error frame. */
-    request(type, payload = {}, timeoutMs = 5000) {
-        const command = { v: 1, kind: 'cmd', type, requestId: randomUUID(), opId: randomUUID(), payload };
+    request(type, payload = {}, { opId = randomUUID(), timeoutMs = 5000 } = {}) {
+        const command = { v: 1, kind: 'cmd', type, requestId: randomUUID(), opId, payload };
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.socket.off('message', onMessage);
@@ -169,7 +178,9 @@ const kickEvent = await guest2.waitEvent('room.member.left', (e) => e.payload.cl
 assert(kickEvent.payload.reason === 'kicked', 'kicked guest notified with reason');
 
 const third = await new SmokeClient('third').connect();
-await third.request('auth.hello', { displayName: '第三人' });
+const thirdHello = await third.request('auth.hello', { displayName: '第三人' });
+const thirdId = thirdHello.payload.clientId;
+const thirdSessionToken = thirdHello.payload.sessionToken;
 const thirdJoin = await third.request('room.join', { roomId: invite.roomId, token: invite.token });
 assert(thirdJoin.kind === 'ack' && thirdJoin.payload.members.length === 2, 'invite still usable within its use limit');
 
@@ -181,7 +192,101 @@ assert(closedEvent.payload.reason === 'host_left', 'guests told room closed when
 const gone = await third.request('room.join', { roomId: invite.roomId, token: invite.token });
 assert(gone.kind === 'error' && gone.payload.code === 'ROOM_NOT_FOUND', 'closed room cannot be rejoined');
 
+// --- M2: shared timeline, proposal queue, reconnect resume ---
+
+const created2 = await host.request('room.create', { creatorKey });
+const room2 = created2.payload.roomId;
+const token2 = created2.payload.inviteToken;
+await guest2.request('room.join', { roomId: room2, token: token2 });
+const thirdJoin2 = await third.request('room.join', { roomId: room2, token: token2 });
+assert(thirdJoin2.kind === 'ack' && thirdJoin2.payload.members.length === 3, 'fresh room for M2 with three members');
+
+const hostSubmit = await host.request('proposal.submit', { text: '房主不该提案' });
+assert(hostSubmit.kind === 'error' && hostSubmit.payload.code === 'FORBIDDEN', 'host cannot submit proposals');
+
+const submitOpId = randomUUID();
+const submitted = await guest2.request('proposal.submit', { text: '我推门而入。' }, { opId: submitOpId });
+assert(submitted.kind === 'ack' && submitted.payload.proposalId, 'guest proposal.submit');
+const pA = submitted.payload.proposalId;
+await host.waitEvent('proposal.submitted', (e) => e.payload.proposal.proposalId === pA);
+assert(true, 'host sees proposal.submitted broadcast');
+
+const resubmitted = await guest2.request('proposal.submit', { text: '我推门而入。' }, { opId: submitOpId });
+assert(resubmitted.kind === 'ack' && resubmitted.payload.proposalId === pA, 'opId retry replays same ack (idempotent)');
+
+const submittedB = await third.request('proposal.submit', { text: '我躲到桌子底下。' });
+const pB = submittedB.payload.proposalId;
+
+const submittedC = await guest2.request('proposal.submit', { text: '（口误，撤回这条）' });
+const pC = submittedC.payload.proposalId;
+const withdrawn = await guest2.request('proposal.withdraw', { proposalId: pC });
+assert(withdrawn.kind === 'ack', 'author withdraws own proposal');
+await host.waitEvent('proposal.withdrawn', (e) => e.payload.proposalId === pC);
+const acceptWithdrawn = await host.request('proposal.accept', { proposalId: pC });
+assert(acceptWithdrawn.kind === 'error' && acceptWithdrawn.payload.code === 'PROPOSAL_NOT_PENDING', 'withdrawn proposal cannot be accepted');
+
+const guestAccept = await third.request('proposal.accept', { proposalId: pA });
+assert(guestAccept.kind === 'error' && guestAccept.payload.code === 'FORBIDDEN', 'guest cannot accept proposals');
+
+const rejected = await host.request('proposal.reject', { proposalId: pB, reason: '和当前场景冲突' });
+assert(rejected.kind === 'ack', 'host rejects a proposal');
+const rejectedEvent = await third.waitEvent('proposal.rejected', (e) => e.payload.proposalId === pB);
+assert(rejectedEvent.payload.reason === '和当前场景冲突', 'author sees rejection with reason');
+
+const accepted = await host.request('proposal.accept', { proposalId: pA });
+assert(accepted.kind === 'ack', 'host accepts a proposal');
+await guest2.waitEvent('proposal.accepted', (e) => e.payload.proposalId === pA);
+assert(true, 'author sees proposal.accepted broadcast');
+
+const published = await host.request('story.message.publish', { text: '我推门而入。', authorName: '客人', role: 'user', proposalId: pA });
+assert(published.kind === 'ack' && published.payload.messageId && published.payload.seq > 0, 'host publishes accepted action to timeline');
+const storyEvent = await third.waitEvent('story.message.published', (e) => e.payload.message.proposalId === pA);
+assert(storyEvent.payload.message.role === 'user', 'guests see the story message');
+
+const guestPublish = await third.request('story.message.publish', { text: '越权发布', authorName: 'x', role: 'user' });
+assert(guestPublish.kind === 'error' && guestPublish.payload.code === 'FORBIDDEN', 'guest cannot publish to timeline');
+
+await third.request('sidechat.message.post', { text: '这段好玩哈哈' });
+const sidechatEvent = await host.waitEvent('sidechat.message.posted');
+assert(sidechatEvent.payload.message.text === '这段好玩哈哈', 'sidechat message broadcast');
+
+const guestGen = await third.request('generation.start', {});
+assert(guestGen.kind === 'error' && guestGen.payload.code === 'FORBIDDEN', 'guest cannot broadcast generation status');
+await host.request('generation.start', {});
+const genStarted = await third.waitEvent('generation.started');
+assert(genStarted.seq === undefined, 'generation events are transient (no seq)');
+await host.request('generation.finish', {});
+const genFinished = await third.waitEvent('generation.finished');
+assert(genFinished.payload.ok === true, 'generation.finished broadcast');
+
+// Reconnect resume: drop a guest, publish while away, then catch up with no gap and no duplicate.
+const savedSeq = third.maxSeqIn(room2);
+third.socket.terminate();
+await host.waitEvent('room.member.offline', (e) => e.payload.clientId === thirdId);
+const awayPublish = await host.request('story.message.publish', { text: '（第三人离线时的剧情推进）', authorName: '角色', role: 'assistant' });
+assert(awayPublish.kind === 'ack', 'timeline advances while a guest is offline');
+
+const third2 = await new SmokeClient('third2').connect();
+const resumedHello = await third2.request('auth.hello', { displayName: '第三人', clientId: thirdId, sessionToken: thirdSessionToken });
+assert(resumedHello.payload.room?.roomId === room2 && resumedHello.payload.room.generating === false, 'hello reports room and generating flag');
+
+const resume = await third2.request('room.resume', { lastAppliedSeq: savedSeq });
+assert(resume.kind === 'ack' && resume.payload.events.length > 0, 'room.resume returns missed events');
+const seqs = resume.payload.events.map((e) => e.seq);
+const contiguous = seqs.every((seq, i) => seq === savedSeq + i + 1);
+assert(contiguous && resume.payload.lastSeq === seqs[seqs.length - 1], 'resume delta is gap-free and duplicate-free');
+assert(resume.payload.events.some((e) => e.type === 'story.message.published' && e.payload.message.text.includes('离线时的剧情推进')), 'missed story message recovered');
+
+const fullReplay = await third2.request('room.resume', { lastAppliedSeq: 0 });
+const submitEvents = fullReplay.payload.events.filter((e) => e.type === 'proposal.submitted' && e.payload.proposal.proposalId === pA);
+assert(submitEvents.length === 1, 'opId dedup kept the retried submit out of the log');
+const rejectedOnTimeline = fullReplay.payload.events.some((e) => e.type === 'story.message.published' && e.payload.message.proposalId === pB);
+assert(!rejectedOnTimeline, 'rejected proposal never appears on the story timeline');
+
+const badResume = await third2.request('room.resume', { lastAppliedSeq: -1 });
+assert(badResume.kind === 'error' && badResume.payload.code === 'BAD_PAYLOAD', 'invalid lastAppliedSeq rejected');
+
 host.close();
 guest2.close();
-third.close();
+third2.close();
 console.log('SMOKE OK');
