@@ -14,8 +14,9 @@ export type RelayServer = {
 
 /**
  * Boundary declaration (M2.5): the asset channel is NOT general file sharing.
- * Only character-card PNGs and avatar images pass, capped at 5 MB — anything
- * else is refused regardless of configuration.
+ * Only character-card PNGs, avatar images, and the host's shared chat save
+ * (jsonl) pass, capped at 5 MB — anything else is refused regardless of
+ * configuration.
  */
 const ASSET_MAX_BYTES = 5 * 1024 * 1024;
 const ASSET_ROUTE = /^\/rooms\/([A-Za-z0-9_-]+)\/assets$/;
@@ -24,6 +25,7 @@ const CLIENT_ID_HEADER = 'x-relay-client-id';
 const SESSION_TOKEN_HEADER = 'x-relay-session-token';
 
 const AVATAR_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const CHAT_CONTENT_TYPES = new Set(['application/jsonl', 'application/x-jsonlines', 'application/json-lines']);
 
 /** Magic-byte check so a mislabeled body cannot smuggle another format. */
 function matchesMagic(contentType: string, data: Buffer): boolean {
@@ -37,6 +39,27 @@ function matchesMagic(contentType: string, data: Buffer): boolean {
         default:
             return false;
     }
+}
+
+/** Cheap structural check for a chat save: every line must be a JSON object. */
+function looksLikeJsonl(data: Buffer): boolean {
+    let text: string;
+    try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+    } catch {
+        return false;
+    }
+    const lines = text.split('\n').filter((line) => line.trim().length > 0);
+    if (!lines.length) return false;
+    for (const line of lines) {
+        try {
+            const value: unknown = JSON.parse(line);
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        } catch {
+            return false;
+        }
+    }
+    return true;
 }
 
 class FixedWindowLimiter {
@@ -110,12 +133,14 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
         }
 
         const kind = url.searchParams.get('kind');
-        if (kind !== 'card' && kind !== 'avatar') {
-            sendError(response, 400, ErrorCode.BAD_PAYLOAD, "kind must be 'card' or 'avatar'.");
+        if (kind !== 'card' && kind !== 'avatar' && kind !== 'chat') {
+            sendError(response, 400, ErrorCode.BAD_PAYLOAD, "kind must be 'card', 'avatar', or 'chat'.");
             return;
         }
-        if (kind === 'card' && access.role !== 'host') {
-            sendError(response, 403, ErrorCode.FORBIDDEN, 'Only the host may share a character card.');
+        if ((kind === 'card' || kind === 'chat') && access.role !== 'host') {
+            sendError(response, 403, ErrorCode.FORBIDDEN, kind === 'card'
+                ? 'Only the host may share a character card.'
+                : 'Only the host may share a chat save.');
             return;
         }
 
@@ -131,11 +156,17 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
         }
 
         const contentType = (request.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
-        const typeOk = kind === 'card' ? contentType === 'image/png' : AVATAR_CONTENT_TYPES.has(contentType);
+        const typeOk = kind === 'card'
+            ? contentType === 'image/png'
+            : kind === 'chat'
+                ? CHAT_CONTENT_TYPES.has(contentType)
+                : AVATAR_CONTENT_TYPES.has(contentType);
         if (!typeOk) {
             sendError(response, 415, ErrorCode.UNSUPPORTED_ASSET_TYPE, kind === 'card'
                 ? 'Character cards must be image/png.'
-                : 'Avatars must be image/png, image/jpeg, or image/webp.');
+                : kind === 'chat'
+                    ? 'Chat saves must be application/jsonl.'
+                    : 'Avatars must be image/png, image/jpeg, or image/webp.');
             return;
         }
 
@@ -156,8 +187,13 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
             }
             return;
         }
-        if (data.length === 0 || !matchesMagic(contentType, data)) {
-            sendError(response, 415, ErrorCode.UNSUPPORTED_ASSET_TYPE, 'Body does not match the declared image type.');
+        const bodyOk = kind === 'chat'
+            ? data.length > 0 && looksLikeJsonl(data)
+            : data.length > 0 && matchesMagic(contentType, data);
+        if (!bodyOk) {
+            sendError(response, 415, ErrorCode.UNSUPPORTED_ASSET_TYPE, kind === 'chat'
+                ? 'Body is not valid jsonl (one JSON object per line).'
+                : 'Body does not match the declared image type.');
             return;
         }
 

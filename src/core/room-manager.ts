@@ -139,6 +139,10 @@ export class RoomManager {
                 return this.#handleRoomCardUpdate(session, identity, command);
             case CommandType.ROOM_CARD_CLEAR:
                 return this.#handleRoomCardClear(session, identity, command);
+            case CommandType.ROOM_CHAT_UPDATE:
+                return this.#handleRoomChatUpdate(session, identity, command);
+            case CommandType.ROOM_CHAT_CLEAR:
+                return this.#handleRoomChatClear(session, identity, command);
             case CommandType.PROPOSAL_SUBMIT:
                 return this.#handleProposalSubmit(session, identity, command);
             case CommandType.PROPOSAL_WITHDRAW:
@@ -373,13 +377,18 @@ export class RoomManager {
             throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host may publish its own character-card asset.');
         }
 
-        const eventPayload = {
+        const eventPayload: Record<string, unknown> = {
             assetId,
             characterName,
             bytes: asset.record.bytes,
             expiresAt: asset.record.expiresAt,
             sharedAt: Date.now(),
         };
+        // 去重元数据（可选，客户端用来跳过重复导入/复用同一本地角色文件）。
+        const cardKey = this.#optionalText(payload.cardKey, 64, 'cardKey');
+        const contentHash = this.#optionalText(payload.contentHash, 128, 'contentHash');
+        if (cardKey) eventPayload.cardKey = cardKey;
+        if (contentHash) eventPayload.contentHash = contentHash;
         await this.#finishOp(session, roomId, command, eventPayload);
         await this.#publishEvent(roomId, EventType.ROOM_CARD_UPDATED, eventPayload, command.opId);
     }
@@ -399,6 +408,64 @@ export class RoomManager {
         await this.assetStore.deleteAsset(roomId, assetId);
         await this.#finishOp(session, roomId, command, { assetId });
         await this.#publishEvent(roomId, EventType.ROOM_CARD_CLEARED, { assetId }, command.opId);
+    }
+
+    /**
+     * Publishes an already-uploaded chat-save asset (jsonl) to the room —
+     * the co-op "save file" guests import to continue a session locally.
+     */
+    async #handleRoomChatUpdate(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        this.#requireHost(identity);
+        if (await this.#replayCachedAck(session, roomId, command)) return;
+
+        const payload = command.payload ?? {};
+        const assetId = this.#requireText(payload.assetId, 100, 'assetId');
+        const chatName = this.#requireText(payload.chatName, 200, 'chatName');
+        const messageCount = payload.messageCount;
+        if (!Number.isInteger(messageCount) || (messageCount as number) < 0) {
+            throw new CommandError(ErrorCode.BAD_PAYLOAD, 'messageCount must be a non-negative integer.');
+        }
+        const asset = await this.assetStore.getAsset(roomId, assetId);
+        if (!asset || asset.record.expiresAt <= Date.now()) {
+            if (asset) await this.assetStore.deleteAsset(roomId, assetId);
+            throw new CommandError(ErrorCode.ASSET_NOT_FOUND, 'Chat save asset was not found or has expired.');
+        }
+        if (asset.record.kind !== 'chat' || asset.record.uploaderClientId !== identity.clientId) {
+            throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host may publish its own chat-save asset.');
+        }
+
+        const eventPayload: Record<string, unknown> = {
+            assetId,
+            chatName,
+            messageCount,
+            bytes: asset.record.bytes,
+            expiresAt: asset.record.expiresAt,
+            sharedAt: Date.now(),
+        };
+        const saveKey = this.#optionalText(payload.saveKey, 64, 'saveKey');
+        const contentHash = this.#optionalText(payload.contentHash, 128, 'contentHash');
+        if (saveKey) eventPayload.saveKey = saveKey;
+        if (contentHash) eventPayload.contentHash = contentHash;
+        await this.#finishOp(session, roomId, command, eventPayload);
+        await this.#publishEvent(roomId, EventType.ROOM_CHAT_UPDATED, eventPayload, command.opId);
+    }
+
+    /** Revokes a shared chat save immediately and tells clients to drop the projection. */
+    async #handleRoomChatClear(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        this.#requireHost(identity);
+        if (await this.#replayCachedAck(session, roomId, command)) return;
+
+        const assetId = this.#requireText((command.payload ?? {}).assetId, 100, 'assetId');
+        const asset = await this.assetStore.getAsset(roomId, assetId);
+        if (asset && (asset.record.kind !== 'chat' || asset.record.uploaderClientId !== identity.clientId)) {
+            throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host may revoke its own chat-save asset.');
+        }
+
+        await this.assetStore.deleteAsset(roomId, assetId);
+        await this.#finishOp(session, roomId, command, { assetId });
+        await this.#publishEvent(roomId, EventType.ROOM_CHAT_CLEARED, { assetId }, command.opId);
     }
 
     async #handleProposalSubmit(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
@@ -639,6 +706,12 @@ export class RoomManager {
             throw new CommandError(ErrorCode.BAD_PAYLOAD, `${field} must be 1-${maxLength} characters.`);
         }
         return text;
+    }
+
+    /** Absent/empty is fine; a present value must still be a bounded string. */
+    #optionalText(value: unknown, maxLength: number, field: string): string | null {
+        if (value === undefined || value === null || value === '') return null;
+        return this.#requireText(value, maxLength, field);
     }
 
     /** Idempotent retry: if this opId already produced an ack, resend it and skip the mutation. */

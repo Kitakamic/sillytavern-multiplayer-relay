@@ -1,10 +1,11 @@
 /**
- * Storage boundary for room assets (character card PNGs and avatar images),
- * the M2.5 asset channel. Sits beside RoomStore; the in-memory implementation
- * serves V1. This is deliberately NOT general file sharing: only the two
- * asset kinds exist, and everything dies with its room or its TTL.
+ * Storage boundary for room assets: character card PNGs, avatar images
+ * (M2.5), and the host's shared chat save (jsonl, the co-op "save file").
+ * Sits beside RoomStore; the in-memory implementation serves V1. This is
+ * deliberately NOT general file sharing: only these asset kinds exist, and
+ * everything dies with its room or its TTL.
  */
-export type AssetKind = 'card' | 'avatar';
+export type AssetKind = 'card' | 'avatar' | 'chat';
 
 export type AssetRecord = {
     assetId: string;

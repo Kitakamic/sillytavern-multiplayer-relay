@@ -315,10 +315,11 @@ const cardAssetId = (await cardUp.json()).assetId;
 const guestCardPublish = await third2.request('room.card.update', { assetId: cardAssetId, characterName: '测试角色' });
 assert(guestCardPublish.kind === 'error' && guestCardPublish.payload.code === 'FORBIDDEN', 'guest cannot publish shared card');
 
-const cardPublished = await host.request('room.card.update', { assetId: cardAssetId, characterName: '测试角色' });
+const cardPublished = await host.request('room.card.update', { assetId: cardAssetId, characterName: '测试角色', cardKey: 'ck-smoke-1', contentHash: 'a'.repeat(64) });
 assert(cardPublished.kind === 'ack' && cardPublished.payload.assetId === cardAssetId, 'host publishes shared card');
 const cardEvent = await third2.waitEvent('room.card.updated', (event) => event.payload.assetId === cardAssetId);
 assert(cardEvent.payload.characterName === '测试角色', 'shared card broadcast reaches guest');
+assert(cardEvent.payload.cardKey === 'ck-smoke-1' && cardEvent.payload.contentHash === 'a'.repeat(64), 'card dedup metadata passes through');
 
 const cardReplay = await third2.request('room.resume', { lastAppliedSeq: cardEvent.seq - 1 });
 assert(cardReplay.payload.events.some((event) => event.type === 'room.card.updated' && event.payload.assetId === cardAssetId), 'shared card survives resume replay');
@@ -332,6 +333,49 @@ assert(cardCleared.kind === 'ack', 'host stops sharing card');
 await third2.waitEvent('room.card.cleared', (event) => event.payload.assetId === cardAssetId);
 const afterClear = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, { headers: thirdCreds2 });
 assert(afterClear.status === 404, 'stopped card share is no longer downloadable');
+
+// --- 联机存档（chat save, jsonl）走同一资产通道 ---
+
+const saveLines = [
+    { user_name: 'Host', character_name: '测试角色', chat_metadata: {} },
+    { name: 'Host', is_user: true, mes: '第一句' },
+    { name: '测试角色', is_user: false, mes: '第二句' },
+];
+const saveJsonl = Buffer.from(saveLines.map((line) => JSON.stringify(line)).join('\n'), 'utf8');
+
+const guestChatUp = await upload(guestCreds, room2, 'kind=chat', saveJsonl, 'application/jsonl');
+assert(guestChatUp.status === 403, 'guest cannot upload a chat save');
+const badJsonl = await upload(hostCreds, room2, 'kind=chat', Buffer.from('not json at all\n{}', 'utf8'), 'application/jsonl');
+assert(badJsonl.status === 415, 'malformed jsonl rejected');
+const chatUp = await upload(hostCreds, room2, 'kind=chat', saveJsonl, 'application/jsonl');
+assert(chatUp.status === 200, 'host uploads chat save');
+const chatAssetId = (await chatUp.json()).assetId;
+
+const guestChatPublish = await third2.request('room.chat.update', { assetId: chatAssetId, chatName: '联机一局', messageCount: 2 });
+assert(guestChatPublish.kind === 'error' && guestChatPublish.payload.code === 'FORBIDDEN', 'guest cannot publish chat save');
+const badCount = await host.request('room.chat.update', { assetId: chatAssetId, chatName: '联机一局', messageCount: -1 });
+assert(badCount.kind === 'error' && badCount.payload.code === 'BAD_PAYLOAD', 'negative messageCount rejected');
+
+const chatPublished = await host.request('room.chat.update', {
+    assetId: chatAssetId, chatName: '联机一局', messageCount: 2, saveKey: 'sk-smoke-1', contentHash: 'b'.repeat(64),
+});
+assert(chatPublished.kind === 'ack' && chatPublished.payload.assetId === chatAssetId, 'host publishes chat save');
+const chatEvent = await third2.waitEvent('room.chat.updated', (event) => event.payload.assetId === chatAssetId);
+assert(chatEvent.payload.chatName === '联机一局' && chatEvent.payload.messageCount === 2, 'chat save broadcast reaches guest');
+assert(chatEvent.payload.saveKey === 'sk-smoke-1' && chatEvent.payload.contentHash === 'b'.repeat(64), 'save dedup metadata passes through');
+
+const chatDownload = await fetch(`${base}/rooms/${room2}/assets/${chatAssetId}`, { headers: thirdCreds2 });
+assert(chatDownload.status === 200, 'guest downloads chat save with room credentials');
+assert(Buffer.from(await chatDownload.arrayBuffer()).equals(saveJsonl), 'downloaded save bytes match upload');
+
+const chatReplay = await third2.request('room.resume', { lastAppliedSeq: 0 });
+assert(chatReplay.payload.events.some((event) => event.type === 'room.chat.updated' && event.payload.assetId === chatAssetId), 'chat save survives resume replay');
+
+const chatCleared = await host.request('room.chat.clear', { assetId: chatAssetId });
+assert(chatCleared.kind === 'ack', 'host stops sharing chat save');
+await third2.waitEvent('room.chat.cleared', (event) => event.payload.assetId === chatAssetId);
+const chatAfterClear = await fetch(`${base}/rooms/${room2}/assets/${chatAssetId}`, { headers: thirdCreds2 });
+assert(chatAfterClear.status === 404, 'stopped chat share is no longer downloadable');
 
 const noAuth = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`);
 assert(noAuth.status === 401, 'download without credentials rejected');
