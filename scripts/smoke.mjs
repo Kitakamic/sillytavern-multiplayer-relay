@@ -254,6 +254,31 @@ await host.request('generation.finish', {});
 const genFinished = await third.waitEvent('generation.finished');
 assert(genFinished.payload.ok === true, 'generation.finished broadcast');
 
+// 同连接命令串行化：发布与 generation.start 背靠背发出（不等 ack），广播顺序必须与发送顺序一致。
+const raceText = '串行化检查——我推门而入';
+const startedBefore = guest2.events.filter((e) => e.type === 'generation.started').length;
+const racePublish = host.request('story.message.publish', { text: raceText, authorName: '房主', role: 'user' });
+const raceStart = host.request('generation.start', {});
+await Promise.all([racePublish, raceStart]);
+{
+    const deadline = Date.now() + 5000;
+    let storyIdx = -1;
+    let startedIdx = -1;
+    while (Date.now() < deadline) {
+        storyIdx = guest2.events.findIndex((e) => e.type === 'story.message.published' && e.payload.message.text === raceText);
+        const startedNow = guest2.events.filter((e) => e.type === 'generation.started').length;
+        if (storyIdx !== -1 && startedNow > startedBefore) {
+            for (let i = guest2.events.length - 1; i >= 0; i--) {
+                if (guest2.events[i].type === 'generation.started') { startedIdx = i; break; }
+            }
+            break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert(storyIdx !== -1 && startedIdx !== -1 && storyIdx < startedIdx, 'per-connection serialization keeps broadcast order (publish before generation.started)');
+}
+await host.request('generation.finish', {});
+
 // Reconnect resume: drop a guest, publish while away, then catch up with no gap and no duplicate.
 const savedSeq = third.maxSeqIn(room2);
 third.socket.terminate();

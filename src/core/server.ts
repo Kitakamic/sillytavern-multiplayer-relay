@@ -324,6 +324,10 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
 
     wss.on('connection', (socket) => {
         const session = new RelaySession(socket);
+        // 同一连接上的命令严格串行处理：socket 发送顺序 = 处理顺序 = 广播顺序。
+        // 否则"发布消息"与紧随的 generation.start 可能被并发处理，
+        // generation.started 广播抢先，客机端故事顺序错乱。
+        let pipeline: Promise<void> = Promise.resolve();
 
         socket.on('message', (data, isBinary) => {
             if (isBinary) {
@@ -332,8 +336,9 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
             }
 
             try {
+                const command = parseClientCommand(data.toString());
                 // handle() reports failures to the client itself and never rejects.
-                void roomManager.handle(session, parseClientCommand(data.toString()));
+                pipeline = pipeline.then(() => roomManager.handle(session, command));
             } catch (error) {
                 const message = error instanceof Error ? error.message : 'Invalid message.';
                 session.send(createError(message));
