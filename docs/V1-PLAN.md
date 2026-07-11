@@ -75,7 +75,8 @@ sillytavern-multiplayer-relay/
 - [x] 仅限两类资产：角色卡 PNG（仅房主可传，强制 image/png）、头像图片（成员均可传，png/jpeg/webp）；魔数校验防伪装；单文件 ≤ 5MB（硬编码边界，不可配置）；限频：每客户端 10 次/分、每房 30 次/分、每房最多 16 个存活资产。
 - [x] TTL 清理：默认 `assetTtlHours`（24h，封顶于房间过期时间），上传可用 `ttlSeconds` 缩短；到期惰性删除 + 上传时清扫；**房间关闭即全部删除**；存储走与 `RoomStore` 同级的 `AssetStore` 接口（`core/asset-store.ts`，V1 内存实现）。
 - [x] 边界声明：这**不是**通用附件功能——除卡片/头像外一律拒收（`kind` 白名单 + 内容类型 + 魔数三重校验），通用附件仍是 V1 排除项。
-- [x] **验收**：`scripts/smoke.mjs`（两外壳各 71 项）——房主上传卡片 → 客人凭房间凭据下载且字节一致；无凭据/错凭据 401；非成员 403；客人传卡 403；非法 kind 400；类型/魔数不符 415；超 5MB 413；限频 429；`ttlSeconds=1` 到期后 404；房主关房后资产不可再取。
+- [x] **验收**：`scripts/smoke.mjs`（两外壳运行同一套完整检查）——房主上传卡片 → 客人凭房间凭据下载且字节一致；无凭据/错凭据 401；非成员 403；客人传卡 403；非法 kind 400；类型/魔数不符 415；超 5MB 413；限频 429；`ttlSeconds=1` 到期后 404；房主关房后资产不可再取。
+- [x] 浏览器接入与房间广播：资产路由支持 CORS 预检；`room.card.update/clear` 仅允许房主发布/撤销完整卡，`room.card.updated/cleared` 进入房间日志供断线 resume，撤销时立即删除资产。
 - 备注：HTTP 错误为 JSON `{error, code}`，code 并入两侧 protocol 的 `ErrorCode` 词汇表（新增 `UNAUTHORIZED / ASSET_NOT_FOUND / ASSET_TOO_LARGE / UNSUPPORTED_ASSET_TYPE / RATE_LIMITED`）。
 
 ### M3 — 插件客户端（控制中心与数据层；2026-07-11 改版：客人故事界面直接走镜像）

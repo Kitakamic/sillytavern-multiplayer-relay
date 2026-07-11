@@ -135,6 +135,10 @@ export class RoomManager {
                 return this.#handleRoomKick(session, identity, command);
             case CommandType.ROOM_RESUME:
                 return this.#handleRoomResume(session, identity, command);
+            case CommandType.ROOM_CARD_UPDATE:
+                return this.#handleRoomCardUpdate(session, identity, command);
+            case CommandType.ROOM_CARD_CLEAR:
+                return this.#handleRoomCardClear(session, identity, command);
             case CommandType.PROPOSAL_SUBMIT:
                 return this.#handleProposalSubmit(session, identity, command);
             case CommandType.PROPOSAL_WITHDRAW:
@@ -349,6 +353,52 @@ export class RoomManager {
             members: await this.#membersWithPresence(roomId),
             events: missed.map((event) => createEvent(event.type, roomId, event.seq, event.payload)),
         }));
+    }
+
+    /** Publishes an already-uploaded full character-card asset to the room. */
+    async #handleRoomCardUpdate(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        this.#requireHost(identity);
+        if (await this.#replayCachedAck(session, roomId, command)) return;
+
+        const payload = command.payload ?? {};
+        const assetId = this.#requireText(payload.assetId, 100, 'assetId');
+        const characterName = this.#requireText(payload.characterName, 100, 'characterName');
+        const asset = await this.assetStore.getAsset(roomId, assetId);
+        if (!asset || asset.record.expiresAt <= Date.now()) {
+            if (asset) await this.assetStore.deleteAsset(roomId, assetId);
+            throw new CommandError(ErrorCode.ASSET_NOT_FOUND, 'Character card asset was not found or has expired.');
+        }
+        if (asset.record.kind !== 'card' || asset.record.uploaderClientId !== identity.clientId) {
+            throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host may publish its own character-card asset.');
+        }
+
+        const eventPayload = {
+            assetId,
+            characterName,
+            bytes: asset.record.bytes,
+            expiresAt: asset.record.expiresAt,
+            sharedAt: Date.now(),
+        };
+        await this.#finishOp(session, roomId, command, eventPayload);
+        await this.#publishEvent(roomId, EventType.ROOM_CARD_UPDATED, eventPayload, command.opId);
+    }
+
+    /** Revokes a shared card immediately and tells clients to drop the projection. */
+    async #handleRoomCardClear(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        this.#requireHost(identity);
+        if (await this.#replayCachedAck(session, roomId, command)) return;
+
+        const assetId = this.#requireText((command.payload ?? {}).assetId, 100, 'assetId');
+        const asset = await this.assetStore.getAsset(roomId, assetId);
+        if (asset && (asset.record.kind !== 'card' || asset.record.uploaderClientId !== identity.clientId)) {
+            throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host may revoke its own character-card asset.');
+        }
+
+        await this.assetStore.deleteAsset(roomId, assetId);
+        await this.#finishOp(session, roomId, command, { assetId });
+        await this.#publishEvent(roomId, EventType.ROOM_CARD_CLEARED, { assetId }, command.opId);
     }
 
     async #handleProposalSubmit(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {

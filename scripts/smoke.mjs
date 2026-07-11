@@ -298,13 +298,40 @@ const thirdCreds2 = credHeaders(thirdId, thirdSessionToken);
 const upload = (creds, roomId, query, body, contentType) =>
     fetch(`${base}/rooms/${roomId}/assets?${query}`, { method: 'POST', headers: { ...creds, 'content-type': contentType }, body });
 
+const preflight = await fetch(`${base}/rooms/${room2}/assets?kind=card`, {
+    method: 'OPTIONS',
+    headers: {
+        origin: 'http://127.0.0.1:8000',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'content-type,x-relay-client-id,x-relay-session-token',
+    },
+});
+assert(preflight.status === 204 && preflight.headers.get('access-control-allow-origin') === '*', 'asset channel accepts browser CORS preflight');
+
 const cardUp = await upload(hostCreds, room2, 'kind=card', png, 'image/png');
 assert(cardUp.status === 200, 'host uploads character card');
 const cardAssetId = (await cardUp.json()).assetId;
 
+const guestCardPublish = await third2.request('room.card.update', { assetId: cardAssetId, characterName: '测试角色' });
+assert(guestCardPublish.kind === 'error' && guestCardPublish.payload.code === 'FORBIDDEN', 'guest cannot publish shared card');
+
+const cardPublished = await host.request('room.card.update', { assetId: cardAssetId, characterName: '测试角色' });
+assert(cardPublished.kind === 'ack' && cardPublished.payload.assetId === cardAssetId, 'host publishes shared card');
+const cardEvent = await third2.waitEvent('room.card.updated', (event) => event.payload.assetId === cardAssetId);
+assert(cardEvent.payload.characterName === '测试角色', 'shared card broadcast reaches guest');
+
+const cardReplay = await third2.request('room.resume', { lastAppliedSeq: cardEvent.seq - 1 });
+assert(cardReplay.payload.events.some((event) => event.type === 'room.card.updated' && event.payload.assetId === cardAssetId), 'shared card survives resume replay');
+
 const download = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, { headers: thirdCreds2 });
 assert(download.status === 200 && download.headers.get('content-type') === 'image/png', 'guest downloads card with room credentials');
 assert(Buffer.from(await download.arrayBuffer()).equals(png), 'downloaded bytes match upload');
+
+const cardCleared = await host.request('room.card.clear', { assetId: cardAssetId });
+assert(cardCleared.kind === 'ack', 'host stops sharing card');
+await third2.waitEvent('room.card.cleared', (event) => event.payload.assetId === cardAssetId);
+const afterClear = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`, { headers: thirdCreds2 });
+assert(afterClear.status === 404, 'stopped card share is no longer downloadable');
 
 const noAuth = await fetch(`${base}/rooms/${room2}/assets/${cardAssetId}`);
 assert(noAuth.status === 401, 'download without credentials rejected');

@@ -221,6 +221,21 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
     async function handleHttp(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
         const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
+        // Assets are fetched by the SillyTavern browser UI from a different
+        // origin. Authentication stays in the explicit room headers; cookies
+        // are never used, so a wildcard origin is safe and avoids deployment
+        // specific origin configuration.
+        response.setHeader('access-control-allow-origin', '*');
+        response.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
+        response.setHeader('access-control-allow-headers', `content-type, ${CLIENT_ID_HEADER}, ${SESSION_TOKEN_HEADER}`);
+        response.setHeader('access-control-max-age', '600');
+
+        if (request.method === 'OPTIONS' && (ASSET_ROUTE.test(url.pathname) || ASSET_ITEM_ROUTE.test(url.pathname))) {
+            response.writeHead(204);
+            response.end();
+            return;
+        }
+
         if (request.method === 'GET' && url.pathname === '/health') {
             sendJson(response, 200, { ok: true, service: 'sillytavern-multiplayer-relay' });
             return;
