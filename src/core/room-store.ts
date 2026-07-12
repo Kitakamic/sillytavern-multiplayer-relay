@@ -49,6 +49,8 @@ export interface RoomStore {
     /** Atomically adds a member, enforcing the capacity cap and uniqueness. */
     addMember(roomId: string, member: RoomMember, maxMembers: number): Promise<void>;
     getMember(roomId: string, clientId: string): Promise<RoomMember | null>;
+    /** Updates an existing member; false means the seat disappeared before the write. */
+    updateMemberDisplayName(roomId: string, clientId: string, displayName: string): Promise<boolean>;
     removeMember(roomId: string, clientId: string): Promise<void>;
     listMembers(roomId: string): Promise<RoomMember[]>;
     /** Idempotency cache: the ack payload previously produced for this opId, if any. */
@@ -114,6 +116,13 @@ export class InMemoryRoomStore implements RoomStore {
     async getMember(roomId: string, clientId: string): Promise<RoomMember | null> {
         const member = this.#members.get(roomId)?.get(clientId);
         return member ? { ...member } : null;
+    }
+
+    async updateMemberDisplayName(roomId: string, clientId: string, displayName: string): Promise<boolean> {
+        const member = this.#members.get(roomId)?.get(clientId);
+        if (!member) return false;
+        member.displayName = displayName;
+        return true;
     }
 
     async removeMember(roomId: string, clientId: string): Promise<void> {

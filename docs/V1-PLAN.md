@@ -51,7 +51,7 @@ sillytavern-multiplayer-relay/
 
 ### M1 — 房间与邀请（✅ 完成于 2026-07-11）
 
-- [x] 命令：`auth.hello` / `room.create` / `room.join` / `room.leave` / `room.kick`（kick 仅房主）。`auth.hello` 颁发 `{clientId, sessionToken}` 恢复凭据，重连时携带即可恢复身份与房间席位（掉线保留席位，广播 offline/online 在线状态事件）。
+- [x] 命令：`auth.hello` / `room.create` / `room.join` / `room.leave` / `room.kick`（kick 仅房主）。`auth.hello` 颁发 `{clientId, sessionToken}` 恢复凭据，重连时携带即可恢复身份与房间席位；有效凭据也可在同一连接上更新当前 Persona 名称，并通过带 `displayName` 的 online 事件刷新成员投影。
 - [x] 邀请码：`room.create` 的 ack 返回 `inviteToken`（24 字节随机、base64url），由插件侧拼装成 `{v, relayUrl, roomId, token}` 邀请码；有效期 `inviteTtlHours`（默认 24h，封顶于房间过期时间），限次使用（`maxRoomMembers - 1` 次）。V1 每房一码、不支持重新签发。
 - [x] 角色模型：host / guest；`room.kick` 服务端校验 host 角色，非房主返回 `FORBIDDEN`。密钥/令牌比较恒定时间（sha256 + timingSafeEqual）。
 - [x] 成员事件广播：`room.member.joined` / `room.member.left`（含 kicked 原因）/ `room.member.offline` / `room.member.online` / `room.closed`，全部写入房间事件日志（带 seq）后向在线成员扇出。事件与错误码词汇表见插件仓库 V1-PLAN §2.1。

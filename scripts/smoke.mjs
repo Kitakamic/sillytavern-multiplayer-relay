@@ -120,6 +120,25 @@ const preHello = await probe.request('room.create', {});
 assert(preHello.kind === 'error' && preHello.payload.code === 'NOT_AUTHENTICATED', 'command before auth.hello rejected');
 probe.close();
 
+const boundA = await new SmokeClient('bound-a').connect();
+const boundAHello = await boundA.request('auth.hello', { displayName: '身份 A' });
+const boundB = await new SmokeClient('bound-b').connect();
+const boundBHello = await boundB.request('auth.hello', { displayName: '身份 B' });
+const identitySwitch = await boundA.request('auth.hello', {
+    displayName: '冒充身份 B',
+    clientId: boundBHello.payload.clientId,
+    sessionToken: boundBHello.payload.sessionToken,
+});
+assert(identitySwitch.kind === 'error' && identitySwitch.payload.code === 'UNAUTHORIZED', 'authenticated socket cannot switch to another identity');
+const boundAStillValid = await boundA.request('auth.hello', {
+    displayName: '身份 A 更新',
+    clientId: boundAHello.payload.clientId,
+    sessionToken: boundAHello.payload.sessionToken,
+});
+assert(boundAStillValid.kind === 'ack' && boundAStillValid.payload.clientId === boundAHello.payload.clientId, 'rejected identity switch keeps the original binding');
+boundA.close();
+boundB.close();
+
 // --- M1: rooms and invitations ---
 
 const creatorKey = loadCreatorKey();
@@ -157,6 +176,17 @@ assert(joined.kind === 'ack' && joined.payload.role === 'guest' && joined.payloa
 assert(joined.payload.members.some((m) => m.role === 'host' && m.online === true), 'guest sees host online');
 await host.waitEvent('room.member.joined', (e) => e.payload.member.clientId === guestId);
 assert(true, 'host sees member.joined broadcast');
+
+const renamed = await guest.request('auth.hello', {
+    displayName: '客人新 Persona',
+    clientId: guestId,
+    sessionToken: guestSessionToken,
+});
+assert(renamed.kind === 'ack' && renamed.payload.clientId === guestId && renamed.payload.room?.roomId === roomId, 'auth.hello keeps the member seat while changing Persona');
+const renamedEvent = await host.waitEvent('room.member.online', (e) => e.payload.clientId === guestId);
+assert(renamedEvent.payload.displayName === '客人新 Persona', 'Persona change is broadcast to online members');
+const renamedSnapshot = await host.request('room.resume', { lastAppliedSeq: host.maxSeqIn(roomId) });
+assert(renamedSnapshot.payload.members.some((member) => member.clientId === guestId && member.displayName === '客人新 Persona'), 'room snapshot persists the changed Persona name');
 
 const forbidden = await guest.request('room.kick', { clientId: hostHello.payload.clientId });
 assert(forbidden.kind === 'error' && forbidden.payload.code === 'FORBIDDEN', 'guest cannot kick (host-only command)');

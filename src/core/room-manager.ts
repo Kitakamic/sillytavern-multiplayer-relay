@@ -61,6 +61,8 @@ export class RoomManager {
     #identities = new Map<string, Identity>();
     /** clientId → the one live session currently speaking for it. */
     #liveSessions = new Map<string, RelaySession>();
+    /** Serializes repeated hello commits for one identity so the newest request wins deterministically. */
+    #helloPipelines = new Map<string, Promise<void>>();
     /** roomId → true while the host has an AI generation in flight (runtime state, not logged). */
     #generating = new Map<string, boolean>();
 
@@ -166,26 +168,32 @@ export class RoomManager {
     async #handleHello(session: RelaySession, command: ClientCommand): Promise<void> {
         const payload = command.payload ?? {};
         const displayName = this.#requireDisplayName(payload.displayName);
+        const { clientId, sessionToken } = payload;
+
+        // Once authenticated, a socket may refresh only its own identity. Issuing or
+        // adopting another identity would leave the old live-session mapping behind.
+        if (session.clientId) {
+            const boundIdentity = this.#identities.get(session.clientId);
+            const stillBound = typeof clientId === 'string'
+                && clientId === session.clientId
+                && typeof sessionToken === 'string'
+                && boundIdentity
+                && secretsMatch(boundIdentity.sessionToken, sessionToken);
+            if (!stillBound) throw new CommandError(ErrorCode.UNAUTHORIZED, 'This connection is already bound to another identity.');
+        }
 
         // Resume path: valid clientId + sessionToken re-binds the existing identity.
-        const { clientId, sessionToken } = payload;
         if (typeof clientId === 'string' && typeof sessionToken === 'string') {
             const identity = this.#identities.get(clientId);
             if (identity && secretsMatch(identity.sessionToken, sessionToken)) {
-                identity.displayName = displayName;
-                this.#bindSession(session, identity.clientId);
-
-                let room: Record<string, unknown> | null = null;
-                if (identity.roomId) {
-                    const membership = await this.#refreshMembership(identity);
-                    if (membership) {
-                        room = { roomId: membership.roomId, role: membership.role, generating: this.#generating.get(membership.roomId) ?? false };
-                        session.send(createAck(command, { clientId: identity.clientId, sessionToken: identity.sessionToken, room }));
-                        await this.#publishEvent(membership.roomId, EventType.ROOM_MEMBER_ONLINE, { clientId: identity.clientId });
-                        return;
+                await this.#serializeHello(identity.clientId, async () => {
+                    if (session.socket.readyState !== WebSocket.OPEN) return;
+                    const currentIdentity = this.#identities.get(identity.clientId);
+                    if (currentIdentity !== identity || !secretsMatch(identity.sessionToken, sessionToken)) {
+                        throw new CommandError(ErrorCode.UNAUTHORIZED, 'Session credentials are no longer valid.');
                     }
-                }
-                session.send(createAck(command, { clientId: identity.clientId, sessionToken: identity.sessionToken, room }));
+                    await this.#commitKnownHello(session, command, identity, displayName);
+                });
                 return;
             }
             // Stale or forged credentials: fall through and issue a fresh identity
@@ -200,8 +208,73 @@ export class RoomManager {
             role: null,
         };
         this.#identities.set(identity.clientId, identity);
-        this.#bindSession(session, identity.clientId);
+        if (!this.#bindSession(session, identity.clientId)) {
+            this.#identities.delete(identity.clientId);
+            return;
+        }
         session.send(createAck(command, { clientId: identity.clientId, sessionToken: identity.sessionToken, room: null }));
+    }
+
+    /** Commits one resumed identity/name update and sends exactly one terminal response. */
+    async #commitKnownHello(session: RelaySession, command: ClientCommand, identity: Identity, displayName: string): Promise<void> {
+        const previousDisplayName = identity.displayName;
+        const membership = identity.roomId ? await this.#refreshMembership(identity) : null;
+        if (!membership) {
+            if (!this.#bindSession(session, identity.clientId)) return;
+            identity.displayName = displayName;
+            session.send(createAck(command, { clientId: identity.clientId, sessionToken: identity.sessionToken, room: null }));
+            return;
+        }
+
+        const updated = await this.store.updateMemberDisplayName(membership.roomId, identity.clientId, displayName);
+        if (!updated) {
+            await this.#refreshMembership(identity);
+            if (!this.#bindSession(session, identity.clientId)) return;
+            identity.displayName = displayName;
+            session.send(createAck(command, { clientId: identity.clientId, sessionToken: identity.sessionToken, room: null }));
+            return;
+        }
+
+        if (!this.#bindSession(session, identity.clientId)) {
+            await this.store.updateMemberDisplayName(membership.roomId, identity.clientId, previousDisplayName);
+            return;
+        }
+        identity.displayName = displayName;
+        try {
+            await this.#publishEvent(membership.roomId, EventType.ROOM_MEMBER_ONLINE, {
+                clientId: identity.clientId,
+                displayName,
+            });
+        } catch (error) {
+            // The member record is the authoritative commit. If logging is temporarily
+            // unavailable, keep the successful identity update and try a transient fanout.
+            console.error('[relay] member name event append failed; falling back to transient broadcast:', error);
+            try {
+                await this.#broadcastTransient(membership.roomId, EventType.ROOM_MEMBER_ONLINE, {
+                    clientId: identity.clientId,
+                    displayName,
+                });
+            } catch (broadcastError) {
+                console.error('[relay] member name transient broadcast failed:', broadcastError);
+            }
+        }
+
+        let currentMembership: { roomId: string; role: MemberRole } | null = membership;
+        try {
+            currentMembership = await this.#refreshMembership(identity);
+        } catch (error) {
+            // The name/session commit already succeeded. A temporary read failure must
+            // not turn that success into an INTERNAL response; resume will revalidate.
+            console.error('[relay] post-hello membership refresh failed; using committed membership:', error);
+        }
+        const room = currentMembership
+            ? {
+                roomId: currentMembership.roomId,
+                role: currentMembership.role,
+                generating: this.#generating.get(currentMembership.roomId) ?? false,
+            }
+            : null;
+        session.send(createAck(command, { clientId: identity.clientId, sessionToken: identity.sessionToken, room }));
     }
 
     async #handleRoomCreate(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
@@ -630,8 +703,18 @@ export class RoomManager {
     async #publishEvent(roomId: string, type: string, payload: Record<string, unknown>, opId: string = randomUUID()): Promise<StoredEvent> {
         const stored = await this.store.appendEvent(roomId, { type, payload, opId, createdAt: Date.now() });
         const message = createEvent(type, roomId, stored.seq, payload);
-        for (const member of await this.store.listMembers(roomId)) {
-            this.#liveSessions.get(member.clientId)?.send(message);
+        try {
+            for (const member of await this.store.listMembers(roomId)) {
+                try {
+                    this.#liveSessions.get(member.clientId)?.send(message);
+                } catch (error) {
+                    console.error(`[relay] event fanout to '${member.clientId}' failed:`, error);
+                }
+            }
+        } catch (error) {
+            // appendEvent is the commit point; fanout failure must not turn a committed
+            // mutation into an error response. room.resume can recover from the log.
+            console.error(`[relay] event '${type}' committed but fanout enumeration failed:`, error);
         }
         return stored;
     }
@@ -674,8 +757,20 @@ export class RoomManager {
         return members.map((member) => ({ ...member, online: this.#liveSessions.has(member.clientId) }));
     }
 
-    /** Makes this socket the sole live session for the client, displacing any zombie. */
-    #bindSession(session: RelaySession, clientId: string): void {
+    async #serializeHello(clientId: string, action: () => Promise<void>): Promise<void> {
+        const previous = this.#helloPipelines.get(clientId) ?? Promise.resolve();
+        const current = previous.catch(() => undefined).then(action);
+        this.#helloPipelines.set(clientId, current);
+        try {
+            await current;
+        } finally {
+            if (this.#helloPipelines.get(clientId) === current) this.#helloPipelines.delete(clientId);
+        }
+    }
+
+    /** Makes an open socket the sole live session for the client, displacing any zombie. */
+    #bindSession(session: RelaySession, clientId: string): boolean {
+        if (session.socket.readyState !== WebSocket.OPEN) return false;
         const previous = this.#liveSessions.get(clientId);
         if (previous && previous !== session) {
             previous.clientId = null;
@@ -683,6 +778,7 @@ export class RoomManager {
         }
         session.clientId = clientId;
         this.#liveSessions.set(clientId, session);
+        return true;
     }
 
     #requireIdentity(session: RelaySession): Identity {
