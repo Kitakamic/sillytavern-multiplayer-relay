@@ -222,6 +222,31 @@ assert(badRole.kind === 'error' && badRole.payload.code === 'BAD_PAYLOAD', 'inva
 const legacyProposal = await guest2.request('proposal.submit', { text: '旧协议命令' });
 assert(legacyProposal.kind === 'error' && legacyProposal.payload.code === 'UNKNOWN_COMMAND', 'proposal commands removed from protocol');
 
+// 共享文档编辑：任何成员可修改/删除任何故事消息（消息粒度 LWW，入日志可重放）。
+const edited = await third.request('story.message.update', { messageId: guestPub.payload.messageId, text: '我推门而入。（修订）' });
+assert(edited.kind === 'ack' && edited.payload.seq > 0, 'any member edits any story message');
+const editEvent = await host.waitEvent('story.message.updated', (e) => e.payload.messageId === guestPub.payload.messageId);
+assert(editEvent.payload.text === '我推门而入。（修订）' && editEvent.payload.editorClientId === thirdId, 'edit broadcast carries editor identity');
+const emptyEdit = await third.request('story.message.update', { messageId: guestPub.payload.messageId, text: '   ' });
+assert(emptyEdit.kind === 'error' && emptyEdit.payload.code === 'BAD_PAYLOAD', 'empty edit rejected');
+
+const deleted = await guest2.request('story.message.delete', { messageId: guestPub.payload.messageId });
+assert(deleted.kind === 'ack', 'any member deletes a story message');
+const deleteEvent = await host.waitEvent('story.message.deleted', (e) => e.payload.messageId === guestPub.payload.messageId);
+assert(deleteEvent.payload.removerClientId === guestId, 'delete broadcast carries remover identity');
+
+// 生成请求（方案 a）：成员请求 → 瞬态广播给房主端执行；生成中拒绝。
+const genReq = await third.request('generation.request', {});
+assert(genReq.kind === 'ack', 'guest requests generation');
+const reqEvent = await host.waitEvent('generation.requested', (e) => e.payload.clientId === thirdId);
+assert(reqEvent.seq === undefined && reqEvent.payload.displayName === '第三人', 'generation request is transient with requester identity');
+await host.request('generation.start', {});
+await host.waitEvent('generation.started');
+const busyReq = await guest2.request('generation.request', {});
+assert(busyReq.kind === 'error' && busyReq.payload.code === 'RATE_LIMITED', 'generation request rejected while generating');
+await host.request('generation.finish', {});
+await host.waitEvent('generation.finished');
+
 // 就绪/跳过信号：瞬态广播，不入日志。
 const badReady = await guest2.request('round.ready', { state: 'done' });
 assert(badReady.kind === 'error' && badReady.payload.code === 'BAD_PAYLOAD', 'invalid ready state rejected');

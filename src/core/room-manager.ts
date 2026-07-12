@@ -144,10 +144,16 @@ export class RoomManager {
                 return this.#handleRoomChatClear(session, identity, command);
             case CommandType.STORY_MESSAGE_PUBLISH:
                 return this.#handleStoryPublish(session, identity, command);
+            case CommandType.STORY_MESSAGE_UPDATE:
+                return this.#handleStoryUpdate(session, identity, command);
+            case CommandType.STORY_MESSAGE_DELETE:
+                return this.#handleStoryDelete(session, identity, command);
             case CommandType.SIDECHAT_MESSAGE_POST:
                 return this.#handleSidechatPost(session, identity, command);
             case CommandType.ROUND_READY:
                 return this.#handleRoundReady(session, identity, command);
+            case CommandType.GENERATION_REQUEST:
+                return this.#handleGenerationRequest(session, identity, command);
             case CommandType.GENERATION_START:
             case CommandType.GENERATION_PROGRESS:
             case CommandType.GENERATION_FINISH:
@@ -492,6 +498,39 @@ export class RoomManager {
         await this.#finishOp(session, roomId, command, { messageId: message.messageId, seq: stored.seq });
     }
 
+    /**
+     * 共享文档编辑（2026-07-12 定稿）：任何成员可修改/删除任何故事消息，
+     * 消息粒度按 seq 最后写入者胜；中继不校验 messageId 是否存在——
+     * 客户端对未知 ID 一律 no-op，语义等价。
+     */
+    async #handleStoryUpdate(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        if (await this.#replayCachedAck(session, roomId, command)) return;
+
+        const payload = command.payload ?? {};
+        const messageId = this.#requireText(payload.messageId, 100, 'messageId');
+        const text = this.#requireText(payload.text, STORY_TEXT_MAX_LENGTH, 'text');
+
+        const stored = await this.#publishEvent(roomId, EventType.STORY_MESSAGE_UPDATED, {
+            messageId,
+            text,
+            editorClientId: identity.clientId,
+        }, command.opId);
+        await this.#finishOp(session, roomId, command, { messageId, seq: stored.seq });
+    }
+
+    async #handleStoryDelete(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        if (await this.#replayCachedAck(session, roomId, command)) return;
+
+        const messageId = this.#requireText((command.payload ?? {}).messageId, 100, 'messageId');
+        const stored = await this.#publishEvent(roomId, EventType.STORY_MESSAGE_DELETED, {
+            messageId,
+            removerClientId: identity.clientId,
+        }, command.opId);
+        await this.#finishOp(session, roomId, command, { messageId, seq: stored.seq });
+    }
+
     async #handleSidechatPost(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
         const roomId = this.#requireRoomId(identity);
         if (await this.#replayCachedAck(session, roomId, command)) return;
@@ -520,6 +559,22 @@ export class RoomManager {
         }
         session.send(createAck(command, {}));
         await this.#broadcastTransient(roomId, EventType.ROUND_READY_CHANGED, { clientId: identity.clientId, state });
+    }
+
+    /**
+     * 生成请求（方案 a，2026-07-12）：任何成员请求推进剧情，房主客户端
+     * 收到瞬态广播后代为触发生成。生成进行中直接拒绝。
+     */
+    async #handleGenerationRequest(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
+        const roomId = this.#requireRoomId(identity);
+        if (this.#generating.get(roomId)) {
+            throw new CommandError(ErrorCode.RATE_LIMITED, 'Generation is already in progress.');
+        }
+        session.send(createAck(command, {}));
+        await this.#broadcastTransient(roomId, EventType.GENERATION_REQUESTED, {
+            clientId: identity.clientId,
+            displayName: identity.displayName,
+        });
     }
 
     /** generation.* status is transient: broadcast without seq, tracked only as a runtime flag. */

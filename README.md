@@ -2,7 +2,7 @@
 
 Private WebSocket relay for the SillyTavern Multiplayer Plugin.
 
-The service is deliberately separate from SillyTavern. It coordinates room membership, invitations, ordering, and reconnects for clients that each run their own local SillyTavern. It must never receive an API key or a local filesystem path. Character and world data are likewise never received, with two exceptions the host explicitly shares to a room: the character card, and the co-op chat save (the current chat's jsonl). Both are relayed temporarily and deleted on expiry or room close (see `docs/V1-PLAN.md`, milestone M2.5).
+The service is deliberately separate from SillyTavern. It coordinates room membership, invitations, ordering, and reconnects for clients that each run their own local SillyTavern. It must never receive an API key or a local filesystem path. Character and world data are likewise never received, with two exceptions the host explicitly shares to a room: the character card, and the co-op chat save (the current chat's jsonl). Both are relayed temporarily and deleted on expiry or room close (see `docs/V1-PLAN.md`, milestone M2.5). The shared story is a co-edited document: any member publishes, edits, or deletes story messages (`story.message.publish/update/delete`, message-level last-writer-wins by relay seq) and requests generation (`generation.request`, executed by the host client).
 
 ## V1 design
 
