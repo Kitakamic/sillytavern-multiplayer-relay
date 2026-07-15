@@ -12,6 +12,14 @@ export type RelayServer = {
     close(): Promise<void>;
 };
 
+/** Version identifiers are supplied by the runtime shell, never read by core. */
+export type RelayBuildInfo = Readonly<{
+    version: string;
+    commit: string;
+}>;
+
+const UNKNOWN_BUILD_INFO: RelayBuildInfo = Object.freeze({ version: 'unknown', commit: 'unknown' });
+
 /**
  * Boundary declaration (M2.5): the asset channel is NOT general file sharing.
  * Only character-card PNGs, avatar images, and the host's shared chat save
@@ -105,11 +113,24 @@ function sendError(response: http.ServerResponse, status: number, code: string, 
     sendJson(response, status, { error: message, code });
 }
 
+function sendAssetAuthorizationError(response: http.ServerResponse, error: 'unauthorized' | 'forbidden'): void {
+    if (error === 'unauthorized') {
+        sendError(response, 401, ErrorCode.UNAUTHORIZED, 'Bad session credentials.');
+        return;
+    }
+    sendError(response, 403, ErrorCode.FORBIDDEN, 'Not a member of this room.');
+}
+
 /**
  * Builds the plain-HTTP/WS server for a shell to run. TLS is deliberately
  * absent — it terminates outside (Caddy on a VPS, the tunnel in local mode).
  */
-export function createRelayServer(config: RelayConfig, roomManager: RoomManager, assetStore: AssetStore): RelayServer {
+export function createRelayServer(
+    config: RelayConfig,
+    roomManager: RoomManager,
+    assetStore: AssetStore,
+    buildInfo: RelayBuildInfo = UNKNOWN_BUILD_INFO,
+): RelayServer {
     // Upload rate limits (M2.5 按房间与连接限频): fixed one-minute windows.
     const uploadsPerClient = new FixedWindowLimiter(10, 60_000);
     const uploadsPerRoom = new FixedWindowLimiter(30, 60_000);
@@ -123,12 +144,8 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
             return;
         }
         const access = await roomManager.authorizeAssetAccess(clientId, sessionToken, roomId);
-        if (access === 'unauthorized') {
-            sendError(response, 401, ErrorCode.UNAUTHORIZED, 'Bad session credentials.');
-            return;
-        }
-        if (access === 'forbidden') {
-            sendError(response, 403, ErrorCode.FORBIDDEN, 'Not a member of this room.');
+        if (typeof access === 'string') {
+            sendAssetAuthorizationError(response, access);
             return;
         }
 
@@ -144,14 +161,9 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
             return;
         }
 
-        const now = Date.now();
-        if (!uploadsPerClient.allow(clientId, now) || !uploadsPerRoom.allow(roomId, now)) {
+        const rateLimitNow = Date.now();
+        if (!uploadsPerClient.allow(clientId, rateLimitNow) || !uploadsPerRoom.allow(roomId, rateLimitNow)) {
             sendError(response, 429, ErrorCode.RATE_LIMITED, 'Too many uploads; slow down.');
-            return;
-        }
-        await assetStore.sweepExpired(now);
-        if (await assetStore.countRoomAssets(roomId) >= MAX_LIVE_ASSETS_PER_ROOM) {
-            sendError(response, 429, ErrorCode.RATE_LIMITED, 'Room asset quota reached.');
             return;
         }
 
@@ -208,17 +220,48 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
             }
         }
 
-        const record = {
-            assetId: randomUUID(),
-            roomId,
-            kind: kind as AssetKind,
-            contentType,
-            bytes: data.length,
-            uploaderClientId: clientId,
-            createdAt: now,
-            expiresAt: Math.min(now + ttlSeconds * 1000, access.roomExpiresAt),
-        };
-        await assetStore.putAsset(record, data);
+        // The body is deliberately read outside the room mutex. Revalidate and
+        // commit the asset under that mutex so a concurrent kick/TTL close
+        // cannot leave an unreachable asset behind after deleting the room.
+        const upload = await roomManager.withAuthorizedAssetAccess(clientId, sessionToken, roomId, async (liveAccess) => {
+            if ((kind === 'card' || kind === 'chat') && liveAccess.role !== 'host') {
+                return { kind: 'forbidden' as const };
+            }
+
+            const now = Date.now();
+            await assetStore.sweepExpired(now);
+            if (await assetStore.countRoomAssets(roomId) >= MAX_LIVE_ASSETS_PER_ROOM) {
+                return { kind: 'quota' as const };
+            }
+
+            const record = {
+                assetId: randomUUID(),
+                roomId,
+                kind: kind as AssetKind,
+                contentType,
+                bytes: data.length,
+                uploaderClientId: clientId,
+                createdAt: now,
+                expiresAt: Math.min(now + ttlSeconds * 1000, liveAccess.roomExpiresAt),
+            };
+            await assetStore.putAsset(record, data);
+            return { kind: 'uploaded' as const, record };
+        });
+        if (!upload.authorized) {
+            sendAssetAuthorizationError(response, upload.error);
+            return;
+        }
+        if (upload.value.kind === 'forbidden') {
+            sendError(response, 403, ErrorCode.FORBIDDEN, kind === 'card'
+                ? 'Only the host may share a character card.'
+                : 'Only the host may share a chat save.');
+            return;
+        }
+        if (upload.value.kind === 'quota') {
+            sendError(response, 429, ErrorCode.RATE_LIMITED, 'Room asset quota reached.');
+            return;
+        }
+        const { record } = upload.value;
         sendJson(response, 200, { ok: true, assetId: record.assetId, kind: record.kind, bytes: record.bytes, expiresAt: record.expiresAt });
     }
 
@@ -229,19 +272,20 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
             sendError(response, 401, ErrorCode.UNAUTHORIZED, 'Missing session credentials.');
             return;
         }
-        const access = await roomManager.authorizeAssetAccess(clientId, sessionToken, roomId);
-        if (access === 'unauthorized') {
-            sendError(response, 401, ErrorCode.UNAUTHORIZED, 'Bad session credentials.');
+        const download = await roomManager.withAuthorizedAssetAccess(clientId, sessionToken, roomId, async () => {
+            const asset = await assetStore.getAsset(roomId, assetId);
+            if (asset && asset.record.expiresAt <= Date.now()) {
+                await assetStore.deleteAsset(roomId, assetId);
+                return null;
+            }
+            return asset;
+        });
+        if (!download.authorized) {
+            sendAssetAuthorizationError(response, download.error);
             return;
         }
-        if (access === 'forbidden') {
-            sendError(response, 403, ErrorCode.FORBIDDEN, 'Not a member of this room.');
-            return;
-        }
-
-        const asset = await assetStore.getAsset(roomId, assetId);
-        if (!asset || asset.record.expiresAt <= Date.now()) {
-            if (asset) await assetStore.deleteAsset(roomId, assetId);
+        const asset = download.value;
+        if (!asset) {
             sendError(response, 404, ErrorCode.ASSET_NOT_FOUND, 'Asset not found or expired.');
             return;
         }
@@ -273,7 +317,15 @@ export function createRelayServer(config: RelayConfig, roomManager: RoomManager,
         }
 
         if (request.method === 'GET' && url.pathname === '/health') {
-            sendJson(response, 200, { ok: true, service: 'sillytavern-multiplayer-relay' });
+            // This endpoint is used to identify the running deployment. Never
+            // let a proxy report a stale version/commit from an older image.
+            response.setHeader('cache-control', 'no-store');
+            sendJson(response, 200, {
+                ok: true,
+                service: 'sillytavern-multiplayer-relay',
+                version: buildInfo.version,
+                commit: buildInfo.commit,
+            });
             return;
         }
 

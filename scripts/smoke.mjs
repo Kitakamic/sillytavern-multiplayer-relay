@@ -112,6 +112,9 @@ const health = await fetch(`${base}/health`).catch((error) => fail(`/health unre
 if (!health.ok) fail(`/health returned HTTP ${health.status}`);
 const body = await health.json();
 assert(body.ok === true, '/health');
+assert(typeof body.version === 'string' && body.version.length > 0, '/health exposes version');
+assert(typeof body.commit === 'string' && body.commit.length > 0, '/health exposes commit');
+assert(health.headers.get('cache-control') === 'no-store', '/health is never cached');
 
 const probe = await new SmokeClient('probe').connect();
 const ping = await probe.request('relay.ping');

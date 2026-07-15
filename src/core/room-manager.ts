@@ -52,6 +52,19 @@ type Identity = {
     role: MemberRole | null;
 };
 
+/** A verified room seat, used by the HTTP asset channel while its room mutex is held. */
+export type AssetAccess = {
+    role: MemberRole;
+    roomExpiresAt: number;
+};
+
+type AssetAuthorization = AssetAccess | 'unauthorized' | 'forbidden';
+
+/** Result shape keeps an asset callback's return value distinct from auth failures. */
+export type AuthorizedAssetActionResult<T> =
+    | { authorized: true; value: T }
+    | { authorized: false; error: 'unauthorized' | 'forbidden' };
+
 /**
  * Transport-safe command boundary: room commands, invitation issuance, and
  * role enforcement run here against the injected RoomStore, never inside
@@ -61,8 +74,10 @@ export class RoomManager {
     #identities = new Map<string, Identity>();
     /** clientId → the one live session currently speaking for it. */
     #liveSessions = new Map<string, RelaySession>();
-    /** Serializes repeated hello commits for one identity so the newest request wins deterministically. */
-    #helloPipelines = new Map<string, Promise<void>>();
+    /** Serializes one identity's hello/create/join transitions before they enter room mutexes. */
+    #identityPipelines = new Map<string, Promise<void>>();
+    /** Serializes every state-changing operation for one room. */
+    #roomPipelines = new Map<string, Promise<void>>();
     /** roomId → true while the host has an AI generation in flight (runtime state, not logged). */
     #generating = new Map<string, boolean>();
 
@@ -77,16 +92,33 @@ export class RoomManager {
      * membership. Returns the member's role and the room's expiry so the
      * caller can cap asset TTLs.
      */
-    async authorizeAssetAccess(clientId: string, sessionToken: string, roomId: string): Promise<
-        { role: MemberRole; roomExpiresAt: number } | 'unauthorized' | 'forbidden'
-    > {
+    async authorizeAssetAccess(clientId: string, sessionToken: string, roomId: string): Promise<AssetAuthorization> {
         const identity = this.#identities.get(clientId);
         if (!identity || !secretsMatch(identity.sessionToken, sessionToken)) return 'unauthorized';
-        const room = await this.#getLiveRoom(roomId);
-        if (!room) return 'forbidden';
-        const member = await this.store.getMember(roomId, clientId);
-        if (!member) return 'forbidden';
-        return { role: member.role, roomExpiresAt: room.expiresAt };
+        return this.#serializeRoom(roomId, () => this.#authorizeAssetAccess(clientId, sessionToken, roomId));
+    }
+
+    /**
+     * Runs the asset-store read/write under the same room mutex as WebSocket
+     * commands.  A preflight authorization alone is intentionally not enough:
+     * a kick or lazy TTL close may happen while an HTTP request body is read.
+     */
+    async withAuthorizedAssetAccess<T>(
+        clientId: string,
+        sessionToken: string,
+        roomId: string,
+        action: (access: AssetAccess) => Promise<T>,
+    ): Promise<AuthorizedAssetActionResult<T>> {
+        const identity = this.#identities.get(clientId);
+        if (!identity || !secretsMatch(identity.sessionToken, sessionToken)) {
+            return { authorized: false, error: 'unauthorized' };
+        }
+
+        return this.#serializeRoom(roomId, async () => {
+            const access = await this.#authorizeAssetAccess(clientId, sessionToken, roomId);
+            if (typeof access === 'string') return { authorized: false, error: access };
+            return { authorized: true, value: await action(access) };
+        });
     }
 
     async handle(session: RelaySession, command: ClientCommand): Promise<void> {
@@ -110,8 +142,15 @@ export class RoomManager {
 
         const identity = this.#identities.get(clientId);
         if (identity?.roomId) {
-            void this.#publishEvent(identity.roomId, EventType.ROOM_MEMBER_OFFLINE, { clientId })
-                .catch((error) => console.error('[relay] offline broadcast failed:', error));
+            const roomId = identity.roomId;
+            void this.#serializeRoom(roomId, async () => {
+                // A replacement socket may have resumed this identity while
+                // this close callback was waiting for the room mutex.
+                if (this.#liveSessions.has(clientId)) return;
+                if (identity.roomId !== roomId || !await this.#getLiveRoom(roomId)) return;
+                if (!await this.store.getMember(roomId, clientId)) return;
+                await this.#publishEvent(roomId, EventType.ROOM_MEMBER_OFFLINE, { clientId });
+            }).catch((error) => console.error('[relay] offline broadcast failed:', error));
         }
     }
 
@@ -127,9 +166,48 @@ export class RoomManager {
         const identity = this.#requireIdentity(session);
         switch (command.type) {
             case CommandType.ROOM_CREATE:
-                return this.#handleRoomCreate(session, identity, command);
+                return this.#serializeIdentity(identity.clientId, () => {
+                    const roomId = identity.roomId;
+                    return roomId
+                        ? this.#serializeRoom(roomId, () => this.#handleRoomCreate(session, identity, command))
+                        : this.#handleRoomCreate(session, identity, command);
+                });
             case CommandType.ROOM_JOIN:
-                return this.#handleRoomJoin(session, identity, command);
+                return this.#serializeIdentity(identity.clientId, () => this.#handleRoomJoin(session, identity, command));
+            case CommandType.ROOM_LEAVE:
+            case CommandType.ROOM_KICK:
+            case CommandType.ROOM_RESUME:
+            case CommandType.ROOM_CARD_UPDATE:
+            case CommandType.ROOM_CARD_CLEAR:
+            case CommandType.ROOM_CHAT_UPDATE:
+            case CommandType.ROOM_CHAT_CLEAR:
+            case CommandType.STORY_MESSAGE_PUBLISH:
+            case CommandType.STORY_MESSAGE_UPDATE:
+            case CommandType.STORY_MESSAGE_DELETE:
+            case CommandType.SIDECHAT_MESSAGE_POST:
+            case CommandType.ROUND_READY:
+            case CommandType.GENERATION_REQUEST:
+            case CommandType.GENERATION_START:
+            case CommandType.GENERATION_PROGRESS:
+            case CommandType.GENERATION_FINISH:
+                break;
+            default:
+                // Keep protocol errors stable: an authenticated client that sends an
+                // unrecognized command should not first be told it lacks a room.
+                throw new CommandError(ErrorCode.UNKNOWN_COMMAND, `Command '${command.type}' is not recognized.`);
+        }
+
+        const roomId = this.#requireRoomId(identity);
+        return this.#serializeRoom(roomId, async () => {
+            // A queued command belongs to the room it was admitted for. If a
+            // newer lifecycle transition moved this identity elsewhere while
+            // it waited, never execute it against that newer room under the
+            // old room's mutex.
+            if (identity.roomId !== roomId) {
+                throw new CommandError(ErrorCode.NOT_IN_ROOM, 'Room membership changed before this command was handled.');
+            }
+            await this.#requireLiveMembership(identity);
+            switch (command.type) {
             case CommandType.ROOM_LEAVE:
                 return this.#handleRoomLeave(session, identity, command);
             case CommandType.ROOM_KICK:
@@ -160,9 +238,10 @@ export class RoomManager {
             case CommandType.GENERATION_PROGRESS:
             case CommandType.GENERATION_FINISH:
                 return this.#handleGeneration(session, identity, command);
-        }
+            }
 
-        throw new CommandError(ErrorCode.UNKNOWN_COMMAND, `Command '${command.type}' is not recognized.`);
+            throw new CommandError(ErrorCode.UNKNOWN_COMMAND, `Command '${command.type}' is not recognized.`);
+        });
     }
 
     async #handleHello(session: RelaySession, command: ClientCommand): Promise<void> {
@@ -186,13 +265,18 @@ export class RoomManager {
         if (typeof clientId === 'string' && typeof sessionToken === 'string') {
             const identity = this.#identities.get(clientId);
             if (identity && secretsMatch(identity.sessionToken, sessionToken)) {
-                await this.#serializeHello(identity.clientId, async () => {
+                await this.#serializeIdentity(identity.clientId, async () => {
                     if (session.socket.readyState !== WebSocket.OPEN) return;
                     const currentIdentity = this.#identities.get(identity.clientId);
                     if (currentIdentity !== identity || !secretsMatch(identity.sessionToken, sessionToken)) {
                         throw new CommandError(ErrorCode.UNAUTHORIZED, 'Session credentials are no longer valid.');
                     }
-                    await this.#commitKnownHello(session, command, identity, displayName);
+                    const roomId = identity.roomId;
+                    if (roomId) {
+                        await this.#serializeRoom(roomId, () => this.#commitKnownHello(session, command, identity, displayName));
+                    } else {
+                        await this.#commitKnownHello(session, command, identity, displayName);
+                    }
                 });
                 return;
             }
@@ -278,7 +362,9 @@ export class RoomManager {
     }
 
     async #handleRoomCreate(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
-        if (identity.roomId) throw new CommandError(ErrorCode.ALREADY_IN_ROOM, 'Leave the current room first.');
+        if (identity.roomId && await this.#refreshMembership(identity)) {
+            throw new CommandError(ErrorCode.ALREADY_IN_ROOM, 'Leave the current room first.');
+        }
 
         const creatorKey = (command.payload ?? {}).creatorKey;
         if (typeof creatorKey !== 'string' || !creatorKey || !secretsMatch(this.config.creatorKey, creatorKey)) {
@@ -330,44 +416,51 @@ export class RoomManager {
             throw new CommandError(ErrorCode.BAD_PAYLOAD, 'roomId and token are required.');
         }
 
-        // Ack-lost retry: already a member of this exact room is a success, not an error.
-        if (identity.roomId === roomId && await this.store.getMember(roomId, identity.clientId)) {
-            session.send(createAck(command, { roomId, role: identity.role, members: await this.#membersWithPresence(roomId) }));
-            return;
-        }
-        if (identity.roomId) throw new CommandError(ErrorCode.ALREADY_IN_ROOM, 'Leave the current room first.');
+        // A join may need to lazily close an expired source room. Hold both
+        // source and destination locks (in a stable order) so that cleanup
+        // cannot delete a room while one of its commands is committing.
+        await this.#serializeRooms([identity.roomId, roomId], async () => {
+            const room = await this.#getLiveRoom(roomId);
+            if (!room) throw new CommandError(ErrorCode.ROOM_NOT_FOUND, 'Room not found or expired.');
 
-        const room = await this.#getLiveRoom(roomId);
-        if (!room) throw new CommandError(ErrorCode.ROOM_NOT_FOUND, 'Room not found or expired.');
+            // Ack-lost retry: already a member of this exact live room is a success, not an error.
+            if (identity.roomId === roomId && await this.store.getMember(roomId, identity.clientId)) {
+                session.send(createAck(command, { roomId, role: identity.role, members: await this.#membersWithPresence(roomId) }));
+                return;
+            }
+            if (identity.roomId && await this.#refreshMembership(identity)) {
+                throw new CommandError(ErrorCode.ALREADY_IN_ROOM, 'Leave the current room first.');
+            }
 
-        const invite = await this.store.getInvite(roomId);
-        if (!invite || invite.expiresAt <= Date.now() || !secretsMatch(invite.token, token)) {
-            throw new CommandError(ErrorCode.INVITE_INVALID, 'Invite is invalid or expired.');
-        }
+            const invite = await this.store.getInvite(roomId);
+            if (!invite || invite.expiresAt <= Date.now() || !secretsMatch(invite.token, token)) {
+                throw new CommandError(ErrorCode.INVITE_INVALID, 'Invite is invalid or expired.');
+            }
 
-        try {
-            await this.store.consumeInviteUse(roomId);
-        } catch {
-            throw new CommandError(ErrorCode.INVITE_INVALID, 'Invite has no uses left.');
-        }
+            try {
+                await this.store.consumeInviteUse(roomId);
+            } catch {
+                throw new CommandError(ErrorCode.INVITE_INVALID, 'Invite has no uses left.');
+            }
 
-        const member = {
-            clientId: identity.clientId,
-            displayName: identity.displayName,
-            role: 'guest' as const,
-            joinedAt: Date.now(),
-        };
-        try {
-            await this.store.addMember(roomId, member, this.config.maxRoomMembers);
-        } catch {
-            throw new CommandError(ErrorCode.ROOM_FULL, 'Room is full.');
-        }
+            const member = {
+                clientId: identity.clientId,
+                displayName: identity.displayName,
+                role: 'guest' as const,
+                joinedAt: Date.now(),
+            };
+            try {
+                await this.store.addMember(roomId, member, this.config.maxRoomMembers);
+            } catch {
+                throw new CommandError(ErrorCode.ROOM_FULL, 'Room is full.');
+            }
 
-        identity.roomId = roomId;
-        identity.role = 'guest';
+            identity.roomId = roomId;
+            identity.role = 'guest';
 
-        session.send(createAck(command, { roomId, role: 'guest', members: await this.#membersWithPresence(roomId) }));
-        await this.#publishEvent(roomId, EventType.ROOM_MEMBER_JOINED, { member }, command.opId);
+            session.send(createAck(command, { roomId, role: 'guest', members: await this.#membersWithPresence(roomId) }));
+            await this.#publishEvent(roomId, EventType.ROOM_MEMBER_JOINED, { member }, command.opId);
+        });
     }
 
     async #handleRoomLeave(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
@@ -545,7 +638,8 @@ export class RoomManager {
      * relay 的 seq 是全序仲裁；assistant（AI 回复）仍仅限房主发布。
      */
     async #handleStoryPublish(session: RelaySession, identity: Identity, command: ClientCommand): Promise<void> {
-        const roomId = this.#requireRoomId(identity);
+        const membership = await this.#requireLiveMembership(identity);
+        const roomId = membership.roomId;
         if (await this.#replayCachedAck(session, roomId, command)) return;
 
         const payload = command.payload ?? {};
@@ -554,7 +648,7 @@ export class RoomManager {
         if (payload.role !== 'user' && payload.role !== 'assistant') {
             throw new CommandError(ErrorCode.BAD_PAYLOAD, "role must be 'user' or 'assistant'.");
         }
-        if (payload.role === 'assistant' && identity.role !== 'host') {
+        if (payload.role === 'assistant' && membership.role !== 'host') {
             throw new CommandError(ErrorCode.FORBIDDEN, 'Only the host publishes assistant messages.');
         }
 
@@ -699,6 +793,18 @@ export class RoomManager {
         await this.store.deleteRoom(roomId);
     }
 
+    /** Checks the asset request while the caller already owns its room mutex. */
+    async #authorizeAssetAccess(clientId: string, sessionToken: string, roomId: string): Promise<AssetAuthorization> {
+        const identity = this.#identities.get(clientId);
+        if (!identity || !secretsMatch(identity.sessionToken, sessionToken)) return 'unauthorized';
+        const room = await this.#getLiveRoom(roomId);
+        if (!room) return 'forbidden';
+        const member = await this.store.getMember(roomId, clientId);
+        if (!member) return 'forbidden';
+        if (identity.roomId === roomId) identity.role = member.role;
+        return { role: member.role, roomExpiresAt: room.expiresAt };
+    }
+
     /** Appends to the room log and fans the event out to every online member. */
     async #publishEvent(roomId: string, type: string, payload: Record<string, unknown>, opId: string = randomUUID()): Promise<StoredEvent> {
         const stored = await this.store.appendEvent(roomId, { type, payload, opId, createdAt: Date.now() });
@@ -752,19 +858,49 @@ export class RoomManager {
         return { roomId, role: member.role };
     }
 
+    /** Revalidates a room command against the live room and current member seat. */
+    async #requireLiveMembership(identity: Identity): Promise<{ roomId: string; role: MemberRole }> {
+        const membership = await this.#refreshMembership(identity);
+        if (!membership) throw new CommandError(ErrorCode.NOT_IN_ROOM, 'Not in a room (it may have closed or expired).');
+        identity.roomId = membership.roomId;
+        identity.role = membership.role;
+        return membership;
+    }
+
     async #membersWithPresence(roomId: string): Promise<Record<string, unknown>[]> {
         const members = await this.store.listMembers(roomId);
         return members.map((member) => ({ ...member, online: this.#liveSessions.has(member.clientId) }));
     }
 
-    async #serializeHello(clientId: string, action: () => Promise<void>): Promise<void> {
-        const previous = this.#helloPipelines.get(clientId) ?? Promise.resolve();
+    /** Serializes identity transitions so a name refresh cannot race a join/create. */
+    async #serializeIdentity<T>(clientId: string, action: () => Promise<T>): Promise<T> {
+        const previous = this.#identityPipelines.get(clientId) ?? Promise.resolve();
         const current = previous.catch(() => undefined).then(action);
-        this.#helloPipelines.set(clientId, current);
+        const tail = current.then(() => undefined, () => undefined);
+        this.#identityPipelines.set(clientId, tail);
         try {
-            await current;
+            return await current;
         } finally {
-            if (this.#helloPipelines.get(clientId) === current) this.#helloPipelines.delete(clientId);
+            if (this.#identityPipelines.get(clientId) === tail) this.#identityPipelines.delete(clientId);
+        }
+    }
+
+    /** Acquires a finite set of room locks in lexical order to avoid a cross-room deadlock. */
+    async #serializeRooms<T>(roomIds: Array<string | null>, action: () => Promise<T>): Promise<T> {
+        const [roomId, ...remaining] = [...new Set(roomIds.filter((value): value is string => Boolean(value)))].sort();
+        if (!roomId) return action();
+        return this.#serializeRoom(roomId, () => this.#serializeRooms(remaining, action));
+    }
+
+    async #serializeRoom<T>(roomId: string, action: () => Promise<T>): Promise<T> {
+        const previous = this.#roomPipelines.get(roomId) ?? Promise.resolve();
+        const current = previous.catch(() => undefined).then(action);
+        const tail = current.then(() => undefined, () => undefined);
+        this.#roomPipelines.set(roomId, tail);
+        try {
+            return await current;
+        } finally {
+            if (this.#roomPipelines.get(roomId) === tail) this.#roomPipelines.delete(roomId);
         }
     }
 

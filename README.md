@@ -18,9 +18,9 @@ npm install
 npm run dev
 ```
 
-`npm run dev` runs the local shell: it listens on `127.0.0.1:3001` and generates its creator key into `data/local-relay-state.json` on first start — no `.env` needed. Windows hosts can simply double-click `start-relay.bat`. To develop against the standalone (VPS) shell instead, copy `.env.example` to `.env` and use `npm run dev:standalone`.
+`npm run dev` runs the local shell: it listens on `127.0.0.1:3001` and generates its creator key into `data/local-relay-state.json` on first start — no `.env` needed. Windows hosts can simply double-click `start-relay.bat`. To develop against the standalone (VPS) shell instead, copy `.env.example` to `.env` and use `npm run dev:standalone`; that shell loads `.env` automatically, while real process environment variables retain priority.
 
-The health endpoint is available at `http://127.0.0.1:3001/health` by default. The WebSocket endpoint is `/ws`. Run `npm run smoke` against either shell to verify it.
+The health endpoint is available at `http://127.0.0.1:3001/health` by default. It returns the service name plus `version` and `commit`, so an operator can verify the deployed Relay revision directly. Set `RELAY_COMMIT` to the short Git SHA used for a deployment (and optionally override `RELAY_VERSION`) in `.env`; Docker Compose passes both into the Relay container. The WebSocket endpoint is `/ws`. Run `npm run smoke` against either shell to verify it.
 
 ## Production
 
@@ -29,6 +29,14 @@ Use Docker Compose with Caddy after setting `RELAY_DOMAIN` and a strong `RELAY_C
 ```bash
 docker compose up -d --build
 ```
+
+Before rebuilding, update `RELAY_COMMIT` in `.env` to the source revision being deployed. Then verify the live image with:
+
+```bash
+curl -fsS https://YOUR_RELAY_DOMAIN/health
+```
+
+Expected fields include `"version":"0.1.1"` and the configured `"commit"`. The Docker build installs the lockfile exactly with `npm ci` in both stages, so the image dependency tree matches `package-lock.json`.
 
 Only Caddy should expose ports 80 and 443. The Relay container is intentionally private to the Docker network.
 

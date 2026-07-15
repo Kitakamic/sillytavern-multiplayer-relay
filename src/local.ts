@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { getRelayBuildInfo } from './build-info.js';
 import { createRelayConfig } from './core/config.js';
 import { InMemoryRoomStore } from './core/room-store.js';
 import { InMemoryAssetStore } from './core/asset-store.js';
@@ -39,10 +40,12 @@ const config = createRelayConfig({
 });
 
 const assetStore = new InMemoryAssetStore();
-const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), assetStore, config), assetStore);
+const buildInfo = getRelayBuildInfo();
+const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), assetStore, config), assetStore, buildInfo);
 await server.listen();
 
 console.log('[SillyTavern Multiplayer Relay] 本地模式已启动');
+console.log(`  版本         ${buildInfo.version} (${buildInfo.commit})`);
 console.log(`  健康检查   http://127.0.0.1:${port}/health`);
 console.log(`  WebSocket  ws://127.0.0.1:${port}/ws`);
 console.log(`  房主密钥   ${config.creatorKey}`);

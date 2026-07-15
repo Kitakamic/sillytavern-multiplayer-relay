@@ -1,4 +1,6 @@
+import 'dotenv/config';
 import process from 'node:process';
+import { getRelayBuildInfo } from './build-info.js';
 import { createRelayConfig } from './core/config.js';
 import { InMemoryRoomStore } from './core/room-store.js';
 import { InMemoryAssetStore } from './core/asset-store.js';
@@ -22,9 +24,10 @@ const config = createRelayConfig({
 });
 
 const assetStore = new InMemoryAssetStore();
-const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), assetStore, config), assetStore);
+const buildInfo = getRelayBuildInfo();
+const server = createRelayServer(config, new RoomManager(new InMemoryRoomStore(), assetStore, config), assetStore, buildInfo);
 await server.listen();
-console.log(`SillyTavern Multiplayer Relay (standalone) listening on http://${config.host}:${config.port}`);
+console.log(`SillyTavern Multiplayer Relay ${buildInfo.version} (${buildInfo.commit}) listening on http://${config.host}:${config.port}`);
 
 const shutdown = () => {
     void server.close().finally(() => process.exit(0));

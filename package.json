@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-multiplayer-relay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Private WSS relay for SillyTavern Multiplayer",
@@ -14,9 +14,12 @@
     "start:local": "node dist/local.js",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run test:guard",
+    "test:guard": "tsx scripts/room-guard.test.ts",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
+    "dotenv": "^16.6.1",
     "ws": "^8.18.3"
   },
   "devDependencies": {
